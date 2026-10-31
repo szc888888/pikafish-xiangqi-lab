@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>隐私政策 | AI 象棋教练</title>
+  <style>body{margin:0;background:#f5f7f5;color:#26362b;font:16px/1.75 system-ui,"Microsoft YaHei",sans-serif}main{max-width:820px;margin:40px auto;padding:0 24px 64px}h1{font-size:30px}h2{margin-top:30px;font-size:21px}small{color:#66766b}a{color:#2e6b4b}.notice{padding:12px 16px;background:#fff4d9;border:1px solid #e8d39c;border-radius:6px}</style>
+</head>
+<body><main>
+  <h1>AI 象棋教练隐私政策</h1>
+  <small id="policy-meta">当前为内部测试版本，尚未启用正式对外运营。</small>
+  <p class="notice" id="publication-notice">运营主体、隐私联系渠道和正式生效日期尚未配置；本页面当前用于说明测试阶段的数据处理方式。</p>
+  <h2>1. 处理的数据</h2>
+  <p>邮箱注册处理邮箱、昵称及密码哈希；第三方 OIDC 登录处理身份平台返回的稳定身份标识、昵称、头像、邮箱及验证状态。保存棋局时处理起始局面、每步走法、当前局面与复盘结果。系统记录您同意的政策版本和时间。</p>
+  <h2>2. 图片与教练问答</h2>
+  <p>上传的棋盘图片只用于本次识别，不在应用数据库中持久化。教练问答和图片识别可能将您提交的问题、图片及必要的棋局上下文发送给配置的外部模型服务。请勿提交与象棋无关的敏感信息。</p>
+  <h2>3. 用途与安全</h2>
+  <p id="security">上述数据用于登录、棋局保存、棋谱重建、引擎复盘、数据导出和故障排查。密码使用 Argon2 哈希；如启用邮件验证，验证和密码重置链接使用有时效的一次性令牌。正式发布前需配置 HTTPS、安全 Cookie、备份及访问控制。</p>
+  <h2>4. 保存与删除</h2>
+  <p id="retention">账号和棋局在账号有效期间保存。导出文件有效期为 24 小时。申请删除后账号立即停用，可在七天内取消；恢复窗口结束后清除账号及关联数据。备份目标保留不少于 30 天；正式运营时会公布实际备份保留期限和存储地点。恢复备份时必须重放删除记录，避免已删除账号重新出现。</p>
+  <h2>5. 您的权利</h2>
+  <p>登录后可请求导出或删除数据，并可在恢复窗口内取消删除。需要重新同意更新后的隐私政策才能继续保存数据。第一版注册后可直接登录；如启用邮件验证，密码重置通过注册邮箱完成。</p>
+  <h2>6. 第三方</h2>
+  <p id="third-party">OIDC 身份平台及配置的外部模型服务会按照各自政策处理其收到的数据。正式运营前将公布具体服务提供方、数据处理地点及适用的保留期限。</p>
+  <h2>7. 联系</h2>
+  <p id="contact">正式对外运营前将公布隐私联系邮箱；目前不开放正式运营注册。</p>
+  <p><a href="/">返回应用</a></p>
+</main>
+<script>
+fetch('/api/privacy/config').then(r=>r.ok?r.json():null).then(config=>{
+  if(!config||!config.ready_for_publication)return;
+  document.getElementById('policy-meta').textContent=`版本：${config.policy_version} · 生效日期：${config.effective_date} · 运营方：${config.operator_name}`;
+  document.getElementById('publication-notice').remove();
+  document.getElementById('security').textContent='上述数据用于登录、棋局保存、棋谱重建、引擎复盘、数据导出和故障排查。密码使用 Argon2 哈希；如启用邮件验证，验证和密码重置链接使用有时效的一次性令牌。站点要求 HTTPS、安全 Cookie、备份及访问控制。';
+  document.getElementById('retention').textContent=`账号和棋局在账号有效期间保存。导出文件有效期为 24 小时。申请删除后账号立即停用，可在七天内取消；恢复窗口结束后清除账号及关联数据。加密备份保留不少于 30 天，存储安排：${config.backup_storage_description}。恢复备份时必须重放删除记录，避免已删除账号重新出现。`;
+  document.getElementById('third-party').textContent=config.third_party_disclosure;
+  document.getElementById('contact').textContent=`隐私与数据请求联系：${config.contact_email}`;
+}).catch(()=>{});
+</script>
+</body></html>
