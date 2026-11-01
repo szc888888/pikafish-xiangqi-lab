@@ -146,9 +146,14 @@ Set-Location -LiteralPath ([string]`$config.WorkingDirectory)
 Write-ProcessLogLine ("[launcher] process_started name={0} file={1}" -f [string]`$config.Name, [string]`$config.FilePath)
 `$processExitCode = 0
 try {
+    # Native processes commonly write warnings to stderr; capture those lines
+    # without letting PowerShell's Stop preference terminate the worker.
+    `$previousErrorActionPreference = `$ErrorActionPreference
+    `$ErrorActionPreference = 'Continue'
     & ([string]`$config.FilePath) @arguments 2>&1 | ForEach-Object {
         Write-ProcessLogLine ([string]`$_)
     }
+    `$ErrorActionPreference = `$previousErrorActionPreference
     if (`$null -ne `$LASTEXITCODE) {
         `$processExitCode = [int]`$LASTEXITCODE
     }
