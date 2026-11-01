@@ -63,6 +63,7 @@ def _normalized_engine_settings(settings: SavedEngineSettings | None) -> SavedEn
     profile = profile_for(settings.difficulty)
     return SavedEngineSettings(
         difficulty=settings.difficulty,
+        allow_suboptimal=settings.allow_suboptimal,
         depth=profile.depth,
         movetime_ms=profile.movetime_ms,
         threads=profile.threads,
@@ -617,7 +618,7 @@ async def engine_move(request: EngineMoveRequest) -> EngineMoveResponse:
             return EngineMoveResponse(**response.model_dump(), difficulty=profile.key,
                                       difficulty_label=profile.label, selected_rank=0,
                                       selection_seed=selection_seed)
-        selected = select_candidate(response.lines, profile, selection_seed)
+        selected = select_candidate(response.lines, profile, selection_seed, allow_suboptimal=request.allow_suboptimal)
         line = selected.line
         result = response.model_dump()
         result.update(bestmove=line.move, score=line.score, depth=line.depth, pv=line.pv)

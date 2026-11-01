@@ -12,7 +12,7 @@ export interface OpeningLine { name: string; aliases: string[]; source: string; 
 export interface CoachMessage { role: 'user' | 'assistant'; content: string }
 export interface SetupImageResult { fen: string; red_to_move: boolean; piece_count: number; warnings: string[] }
 export interface PersistedGameMove { ply: number; side: 'red' | 'black'; uci: string; notation_zh: string; before_fen: string; after_fen: string }
-export interface PersistedEngineSettings { difficulty: 'companion' | 'beginner' | 'progress' | 'serious' | 'full' | 'custom'; depth: number; movetime_ms: number; threads: number; hash_mb: number }
+export interface PersistedEngineSettings { difficulty: 'companion' | 'beginner' | 'progress' | 'serious' | 'full' | 'custom'; allow_suboptimal: boolean; depth: number; movetime_ms: number; threads: number; hash_mb: number }
 export interface PersistedGame { id: string; name: string | null; initial_fen: string; current_fen: string; red_to_move: boolean; status: string; version: number; created_at: string; updated_at: string; engine_settings: PersistedEngineSettings; moves: PersistedGameMove[] }
 export interface DataRequest { id: string; type: 'export' | 'delete'; status: string; expires_at: string | null; download_url: string | null }
 export interface AuthMethods { email: boolean; oidc: boolean; email_verification_required: boolean }
@@ -189,7 +189,7 @@ export const getHealth = () => request<Health>('/api/health')
 export const resetEngine = () => request<Health>('/api/engine/reset', { method: 'POST' })
 export const analyze = (payload: { fen: string; moves: string[]; depth: number; movetime_ms: number; multipv: number; threads: number; hash_mb: number }) => request<Analysis>('/api/engine/analyze', { method: 'POST', body: JSON.stringify(payload) })
 export interface EngineMove extends Analysis { difficulty: string; difficulty_label: string; selected_rank: number; selection_seed: string }
-export const engineMove = (payload: { fen: string; moves: string[]; difficulty: string; game_id: string; ply: number; depth: number; movetime_ms: number; multipv: number; threads: number; hash_mb: number }) => request<EngineMove>('/api/engine/move', { method: 'POST', body: JSON.stringify(payload) })
+export const engineMove = (payload: { fen: string; moves: string[]; difficulty: string; allow_suboptimal: boolean; game_id: string; ply: number; depth: number; movetime_ms: number; multipv: number; threads: number; hash_mb: number }) => request<EngineMove>('/api/engine/move', { method: 'POST', body: JSON.stringify(payload) })
 export const validate = (payload: { fen: string; moves: string[] }) => post('/api/engine/validate', payload)
 export const analyzePlan = (payload: { fen: string; moves: string[]; idea: string; move: string; depth: number; movetime_ms: number; threads: number; hash_mb: number }) => request<PlanAnalysis>('/api/engine/plan-analysis', { method: 'POST', body: JSON.stringify(payload) })
 export const review = (payload: { fen: string; moves: string[]; depth?: number; movetime_ms?: number; threads?: number; hash_mb?: number }) => request<ReviewResponse>('/api/engine/review', { method: 'POST', body: JSON.stringify(payload) })

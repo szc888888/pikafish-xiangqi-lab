@@ -2,6 +2,7 @@ export type OpponentDifficulty = 'companion' | 'beginner' | 'progress' | 'seriou
 
 export interface SavedOpponentSettings {
   difficulty: OpponentDifficulty
+  allow_suboptimal: boolean
   depth: number
   movetime_ms: number
   threads: number
@@ -37,6 +38,7 @@ export function normalizeSavedEngineSettings(value: unknown): SavedOpponentSetti
   if (difficulty !== 'custom') {
     return {
       difficulty,
+      allow_suboptimal: stored.allow_suboptimal !== false,
       depth: defaults.depth,
       movetime_ms: defaults.movetime,
       threads: defaults.threads,
@@ -45,6 +47,7 @@ export function normalizeSavedEngineSettings(value: unknown): SavedOpponentSetti
   }
   return {
     difficulty,
+    allow_suboptimal: stored.allow_suboptimal !== false,
     depth: bounded(stored.depth ?? game.depth, defaults.depth, 1, 64),
     movetime_ms: bounded(stored.movetime_ms ?? game.movetime, defaults.movetime, 0, 120_000),
     threads: bounded(stored.threads, defaults.threads, 1, 16),

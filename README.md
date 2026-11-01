@@ -77,7 +77,21 @@ alembic upgrade head
 
 ### 3. 准备 Pikafish（可选）
 
-将官方发布包中的引擎程序及对应 `.nnue` 文件放在 `engine` 目录。Windows 默认查找 `engine/pikafish.exe`；也可以在 `.env` 指定路径：
+Windows x86-64 用户可在项目根目录一键下载安装官方引擎及对应 NNUE：
+
+```powershell
+.\scripts\install-engine.ps1
+```
+
+预览下载版本而不安装：
+
+```powershell
+.\scripts\install-engine.ps1 -WhatIf
+```
+
+如需更新现有引擎，加 `-Force`；需要固定版本时传入官方 tag，例如 `-Version Pikafish-2026-09-06`。安装脚本只从 Pikafish 官方 Releases 获取文件，不把引擎二进制存入本项目仓库。也可以从[官方 Releases](https://github.com/official-pikafish/Pikafish/releases)手动下载兼容的引擎与 `.nnue` 放入 `engine` 目录。
+
+Windows 默认查找 `engine/pikafish.exe`；也可以在 `.env` 指定路径：
 
 ```dotenv
 PIKAFISH_PATH=D:\chess\engine\pikafish.exe
@@ -148,6 +162,77 @@ npm run dev
 4. **运行数据库迁移**：在发布新版本前备份数据库，再从 `apps/api` 执行 `alembic upgrade head`。应用启动时会检查生产数据库的 Alembic 版本，不匹配则拒绝启动。
 5. **构建前端并托管静态文件**：执行 `cd apps/web; npm install; npm run build`，将 `apps/web/dist` 发布到 HTTPS 站点。仓库当前未包含 npm lock 文件，因此这里使用 `npm install`。由 Nginx、Caddy 或云负载均衡将 `/api` 和 `/auth` 转发给仅监听内网的 Uvicorn API。设置正确的 Host、转发协议和 Cookie 安全属性。
 6. **守护 API 进程**：在 `apps/api` 的 Python 环境中运行 `uvicorn app.main:app --host 127.0.0.1 --port 8000`，由 systemd、Windows 服务管理器或容器平台负责启动和守护；生产中不要使用 `--reload` 或 Vite 开发服务器。Uvicorn 应仅对反向代理开放，并配置进程重启策略、日志收集、资源限制和健康检查。
+
+   Linux 使用 systemd 时，可以按下面的示例部署。Pikafish 不需要单独注册为 systemd 服务；API 会按需启动 Pikafish 子进程，并通过 UCI 协议与其通信。
+
+   **准备 Pikafish 和 API 运行目录**（以下假设项目部署在 `/opt/pikafish-lab`，服务账号为 `chess`）：
+
+   ```bash
+   sudo useradd --system --home-dir /opt/pikafish-lab --shell /usr/sbin/nologin chess
+   sudo install -d -o chess -g chess /opt/pikafish-lab/engine /opt/pikafish-lab/logs
+
+   # 从 Pikafish 官方 Releases 下载与服务器架构匹配的 Linux 二进制和 NNUE 文件
+   sudo install -o chess -g chess -m 0755 pikafish /opt/pikafish-lab/engine/pikafish
+   sudo install -o chess -g chess -m 0644 pikafish.nnue /opt/pikafish-lab/engine/pikafish.nnue
+
+   cd /opt/pikafish-lab/apps/api
+   python3.11 -m venv .venv
+   . .venv/bin/activate
+   python -m pip install -r requirements.txt
+   deactivate
+   ```
+
+   **创建生产环境文件** `/etc/pikafish-lab/api.env`。将第 3 步要求的生产变量一并写入此文件，至少包含 Pikafish 路径：
+
+   ```dotenv
+   APP_ENV=production
+   PIKAFISH_PATH=/opt/pikafish-lab/engine/pikafish
+   PIKAFISH_EVAL_FILE=/opt/pikafish-lab/engine/pikafish.nnue
+   ```
+
+   环境文件包含会话密钥、数据库密码等敏感信息，应限制读取权限：
+
+   ```bash
+   sudo chown root:chess /etc/pikafish-lab/api.env
+   sudo chmod 0640 /etc/pikafish-lab/api.env
+   ```
+
+   **创建 systemd 单元** `/etc/systemd/system/pikafish-lab-api.service`：
+
+   ```ini
+   [Unit]
+   Description=Pikafish Xiangqi Lab API
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   User=chess
+   Group=chess
+   WorkingDirectory=/opt/pikafish-lab
+   EnvironmentFile=/etc/pikafish-lab/api.env
+   ExecStart=/opt/pikafish-lab/apps/api/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   Restart=on-failure
+   RestartSec=5
+   TimeoutStopSec=15
+   NoNewPrivileges=true
+   PrivateTmp=true
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   **启用并检查服务**：
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now pikafish-lab-api
+   sudo systemctl status pikafish-lab-api
+   sudo journalctl -u pikafish-lab-api -f
+   curl --fail http://127.0.0.1:8000/api/health
+   ```
+
+   如果健康检查正常但引擎不可用，先检查 `PIKAFISH_PATH` 是否可执行、NNUE 路径是否存在，以及服务账号是否有读取和执行权限。引擎启动、UCI 握手和搜索错误会同时记录到项目 `logs/api.log` 和 systemd 日志中。
 7. **验证发布与恢复流程**：检查 `/api/health`、注册/登录、棋局存取、引擎状态、隐私政策状态和 HTTPS Cookie；按[运行手册](docs/operations/account-and-backup.md)配置加密备份、计划任务及恢复演练。
 
 OIDC 如需启用，另行配置 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 和与身份提供商登记地址一致的 `OIDC_REDIRECT_URI`。邮箱密码注册/登录默认不要求验证邮件；启用 `EMAIL_VERIFICATION_REQUIRED=true` 后，必须配置 SMTP 邮件发送参数及 HTTPS `PUBLIC_BASE_URL`。

@@ -36,6 +36,11 @@ def test_full_profile_always_selects_best_candidate():
     assert selected.line.rank == 1
 
 
+def test_disabling_suboptimal_moves_always_selects_best_legal_candidate():
+    selected = select_candidate(_lines(), profile_for("companion"), "seed", allow_suboptimal=False)
+    assert selected.line.rank == 1
+
+
 def test_custom_profile_uses_bounded_overrides():
     profile = profile_for("custom", depth=1, movetime_ms=100, threads=99, hash_mb=99999)
     assert profile.depth == 1
@@ -122,6 +127,26 @@ def test_move_endpoint_uses_profile_and_deterministic_selection(monkeypatch):
     assert result.difficulty_label == "轻松陪练"
     assert result.selection_seed == "g1:0"
     assert result.bestmove == select_candidate(_lines(), profile_for("companion"), "g1:0").line.move
+
+
+def test_engine_move_request_exposes_suboptimal_move_setting():
+    request = EngineMoveRequest(fen=START_FEN, moves=[], difficulty="companion", game_id="g1", ply=0,
+                                allow_suboptimal=False)
+    assert request.allow_suboptimal is False
+
+
+def test_move_endpoint_honors_disabled_suboptimal_moves(monkeypatch):
+    from app import main
+
+    async def fake_analyze(fen, moves, depth, movetime_ms, multipv, threads, hash_mb):
+        return EngineResponse(bestmove="a0a1", lines=_lines())
+
+    monkeypatch.setattr(main.engine, "analyze", fake_analyze)
+    request = EngineMoveRequest(fen=START_FEN, moves=[], difficulty="companion", game_id="g1", ply=0,
+                                allow_suboptimal=False)
+    result = __import__("asyncio").run(main.engine_move(request))
+    assert result.selected_rank == 1
+    assert result.bestmove == "a0a1"
 
 
 def test_move_endpoint_rejects_invalid_history_before_engine(monkeypatch):

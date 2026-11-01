@@ -15,6 +15,7 @@ class EngineRequest(BaseModel):
 
 class EngineMoveRequest(EngineRequest):
     difficulty: Literal["companion", "beginner", "progress", "serious", "full", "custom"] = "progress"
+    allow_suboptimal: bool = True
     game_id: str = Field(min_length=1, max_length=200)
     ply: int = Field(ge=0, le=400)
 
@@ -196,6 +197,7 @@ class SetupImageResponse(BaseModel):
 
 class SavedEngineSettings(BaseModel):
     difficulty: Literal["companion", "beginner", "progress", "serious", "full", "custom"] = "progress"
+    allow_suboptimal: bool = True
     depth: int = Field(default=4, ge=1, le=64)
     movetime_ms: int = Field(default=700, ge=0, le=120_000)
     threads: int = Field(default=1, ge=1, le=16)

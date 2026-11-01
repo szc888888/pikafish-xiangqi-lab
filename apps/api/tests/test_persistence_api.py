@@ -65,7 +65,7 @@ def test_stale_game_version_is_rejected_without_a_second_move():
 
 
 def test_game_engine_settings_round_trip_on_create_and_append_move():
-    settings = {"difficulty": "custom", "depth": 3, "movetime_ms": 500, "threads": 2, "hash_mb": 128}
+    settings = {"difficulty": "custom", "allow_suboptimal": False, "depth": 3, "movetime_ms": 500, "threads": 2, "hash_mb": 128}
     with TestClient(app) as client:
         headers = {"X-Dev-User": "settings-owner"}
         created = client.post(
@@ -84,7 +84,7 @@ def test_game_engine_settings_round_trip_on_create_and_append_move():
 
 
 def test_fixed_profile_storage_uses_canonical_preset_parameters():
-    fixed_settings = {"difficulty": "progress", "depth": 12, "movetime_ms": 9000, "threads": 4, "hash_mb": 2048}
+    fixed_settings = {"difficulty": "progress", "allow_suboptimal": False, "depth": 12, "movetime_ms": 9000, "threads": 4, "hash_mb": 2048}
     with TestClient(app) as client:
         headers = {"X-Dev-User": "canonical-settings"}
         created = client.post(
@@ -92,7 +92,7 @@ def test_fixed_profile_storage_uses_canonical_preset_parameters():
             json={"name": "固定档位", "initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1", "engine_settings": fixed_settings},
         )
         assert created.status_code == 201
-        expected = {"difficulty": "progress", "depth": 4, "movetime_ms": 700, "threads": 1, "hash_mb": 64}
+        expected = {"difficulty": "progress", "allow_suboptimal": False, "depth": 4, "movetime_ms": 700, "threads": 1, "hash_mb": 64}
         assert created.json()["engine_settings"] == expected
 
         moved = client.post(
@@ -112,6 +112,7 @@ def test_legacy_game_defaults_to_progress_profile():
         )
         assert created.status_code == 201
         assert created.json()["engine_settings"]["difficulty"] == "progress"
+        assert created.json()["engine_settings"]["allow_suboptimal"] is True
 
 
 def test_existing_game_row_with_null_engine_settings_serializes_progress_defaults():
@@ -130,7 +131,7 @@ def test_existing_game_row_with_null_engine_settings_serializes_progress_default
         fetched = client.get(f"/api/games/{created.json()['id']}", headers=headers)
         assert fetched.status_code == 200
         assert fetched.json()["engine_settings"] == {
-            "difficulty": "progress", "depth": 4, "movetime_ms": 700,
+            "difficulty": "progress", "allow_suboptimal": True, "depth": 4, "movetime_ms": 700,
             "threads": 1, "hash_mb": 64,
         }
 

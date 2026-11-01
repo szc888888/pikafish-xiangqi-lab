@@ -76,11 +76,13 @@ def _loss(best: EngineLine, candidate: EngineLine) -> int | None:
     return max(0, best.score.value - candidate.score.value)
 
 
-def select_candidate(lines: list[EngineLine], profile: EngineProfile, seed: str) -> CandidateSelection:
+def select_candidate(
+    lines: list[EngineLine], profile: EngineProfile, seed: str, *, allow_suboptimal: bool = True,
+) -> CandidateSelection:
     if not lines:
         raise ValueError("没有合法候选着法")
     ordered = sorted(lines, key=lambda line: line.rank)
-    if profile.full_strength:
+    if profile.full_strength or not allow_suboptimal:
         return CandidateSelection(ordered[0], profile)
     best = ordered[0]
     if best.score is None:

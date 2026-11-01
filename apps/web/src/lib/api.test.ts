@@ -9,7 +9,7 @@ describe('image recognition request', () => {
 
 describe('API transport errors', () => {
   it('sends the deterministic play profile payload to the dedicated move endpoint', async () => {
-    const payload = { fen: 'fen', moves: ['a3a4'], difficulty: 'custom', game_id: 'game-1', ply: 1, depth: 3, movetime_ms: 500, multipv: 1, threads: 2, hash_mb: 128 }
+    const payload = { fen: 'fen', moves: ['a3a4'], difficulty: 'custom', allow_suboptimal: false, game_id: 'game-1', ply: 1, depth: 3, movetime_ms: 500, multipv: 1, threads: 2, hash_mb: 128 }
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,

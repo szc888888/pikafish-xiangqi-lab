@@ -16,9 +16,15 @@ describe('engine strength profiles', () => {
 
   it('preserves valid custom parameters and repairs out-of-range saved values', () => {
     expect(normalizeSavedEngineSettings({ difficulty: 'custom', depth: 3, movetime_ms: 500, threads: 2, hash_mb: 128 }))
-      .toMatchObject({ difficulty: 'custom', depth: 3, movetime_ms: 500, threads: 2, hash_mb: 128 })
+      .toMatchObject({ difficulty: 'custom', allow_suboptimal: true, depth: 3, movetime_ms: 500, threads: 2, hash_mb: 128 })
     expect(normalizeSavedEngineSettings({ difficulty: 'custom', depth: 0, movetime_ms: -1, threads: 0, hash_mb: 8 }))
       .toMatchObject({ difficulty: 'custom', depth: 1, movetime_ms: 0, threads: 1, hash_mb: 16 })
+  })
+
+  it('preserves the suboptimal move preference and defaults older saves to enabled', () => {
+    expect(normalizeSavedEngineSettings({ difficulty: 'companion', allow_suboptimal: false }).allow_suboptimal).toBe(false)
+    expect(normalizeSavedEngineSettings({ difficulty: 'custom', allow_suboptimal: false }).allow_suboptimal).toBe(false)
+    expect(normalizeSavedEngineSettings({ difficulty: 'progress' }).allow_suboptimal).toBe(true)
   })
 
   it('normalizes fixed profiles to their preset parameters even when a legacy save has stale values', () => {
