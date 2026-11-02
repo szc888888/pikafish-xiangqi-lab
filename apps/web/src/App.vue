@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, deleteGame, engineMove, forgotPassword, getAuthMethods, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, loginEmail, logout, persistReview, recognizeSetupImage, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, verifyEmail, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
+import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, deleteGame, engineMove, forgotPassword, getAuthMethods, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, loginEmail, logout, persistReview, recognizeSetupImage, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, verifyEmail, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
 import { applyMove, clonePosition, describeUci, fromUci, legalTargets, movePiece, parseFen, perpetualCheckSide, perpetualChaseSide, setPiece, START_FEN, toFen, toUci, validateSetupPosition, type Piece, type Position } from './lib/xiangqi'
 import { listRecognizedPieces } from './lib/recognitionPositions'
 import { recognitionControls } from './lib/recognitionState'
@@ -212,13 +212,47 @@ function readBoardTheme(){try{boardTheme.value=parseBoardTheme(localStorage.getI
 function readSavedGames(){
   try{const value=JSON.parse(localStorage.getItem(GAME_STORAGE_KEY)??'[]');savedGames.value=Array.isArray(value)?value.filter((g:any)=>g&&typeof g.id==='string'&&typeof g.baseFen==='string'&&Array.isArray(g.moves)).map((g:any)=>{const settings=normalizeSavedEngineSettings(g);return{...g,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{...g.hintSettings,difficulty:['beginner','regular','elite','custom'].includes(g.hintSettings?.difficulty)?g.hintSettings.difficulty:'regular',depth:g.hintSettings?.depth??g.depth??10,movetime_ms:g.hintSettings?.movetime_ms??g.movetime??1500,multipv:g.hintSettings?.multipv??1},hintsUsed:g.hintsUsed??0}}):[]}catch{savedGames.value=[]}
 }
-async function loadServerGames(){
-  try{currentUser.value=await getMe()}catch{currentUser.value=null;return}
-  if(currentUser.value.status!=='active'||currentUser.value.privacy_accepted===false)return
+function serverGameRecord(game:PersistedGame):SavedGame{
+  const settings=normalizeSavedEngineSettings(game.engine_settings)
+  return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),side:'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length}
+}
+function gameEngineSettings(game:SavedGame):PersistedEngineSettings{return{difficulty:game.difficulty,allow_suboptimal:game.difficultySettings.allow_suboptimal,depth:game.difficultySettings.depth,movetime_ms:game.difficultySettings.movetime_ms,threads:game.difficultySettings.threads,hash_mb:game.difficultySettings.hash_mb}}
+interface GameMigrationResult { migrated:number; failed:number }
+async function migrateLocalGames():Promise<GameMigrationResult>{
+  let migrated=0,failed=0
+  const guestGames=savedGames.value.filter(game=>game.serverVersion===undefined)
+  for(const game of guestGames){
+    const localId=game.id
+    try{
+      const remote=await createGame({name:game.name||undefined,initial_fen:game.baseFen,engine_settings:gameEngineSettings(game)})
+      game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length
+      if(currentGameId.value===localId)currentGameId.value=remote.id
+      persistGames()
+      await syncCurrentGame(game)
+      migrated++
+    }catch{if(game.serverVersion===undefined)failed++}
+  }
+  const partialGames=savedGames.value.filter(game=>game.serverVersion!==undefined&&(game.syncedMoves??0)<game.moves.length)
+  for(const game of partialGames){
+    try{await syncCurrentGame(game);migrated++}catch{failed++}
+  }
+  return{migrated,failed}
+}
+async function loadServerGames():Promise<GameMigrationResult>{
+  const empty={migrated:0,failed:0}
+  try{currentUser.value=await getMe()}catch{currentUser.value=null;return empty}
+  if(currentUser.value.status!=='active'||currentUser.value.privacy_accepted===false)return empty
   try{
-    const remote=await getGames()
-    savedGames.value=remote.map(game=>{const settings=normalizeSavedEngineSettings(game.engine_settings);return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),side:'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length}})
-  }catch{message.value='云端棋局加载失败，请稍后重试'}
+    const remote=await getGames(),localGames=savedGames.value,remoteGames=remote.map(serverGameRecord),remoteIds=new Set(remoteGames.map(game=>game.id))
+    const merged=remoteGames.map(remoteGame=>{
+      const local=localGames.find(game=>game.id===remoteGame.id)
+      if(!local)return remoteGame
+      return{...remoteGame,...local,serverVersion:remoteGame.serverVersion,syncedMoves:Math.min(local.syncedMoves??remoteGame.syncedMoves??0,remoteGame.moves.length)}
+    })
+    const guestGames=localGames.filter(game=>game.serverVersion===undefined&&!remoteIds.has(game.id))
+    savedGames.value=[...merged,...guestGames].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));persistGames()
+    return await migrateLocalGames()
+  }catch{message.value='云端棋局加载失败，请稍后重试';return empty}
 }
 async function loadAuthState(){
   try{authMethods.value=await getAuthMethods()}catch{authMethods.value={email:true,oidc:false,email_verification_required:false}}
@@ -240,11 +274,11 @@ async function submitEmailAuth(){
       await resetPassword(emailActionToken.value,emailAuthPassword.value);emailAuthTab.value='login';emailAuthPassword.value='';emailActionToken.value='';emailAuthNotice.value='密码已重置，请重新登录。';return
     }
     await loginEmail({email:emailAuthEmail.value,password:emailAuthPassword.value})
-    currentUser.value=await getMe();emailAuthOpen.value=false;emailAuthPassword.value='';await loadServerGames();message.value='登录成功'
+    currentUser.value=await getMe();emailAuthOpen.value=false;emailAuthPassword.value='';const migration=await loadServerGames();message.value=migration.migrated?`登录成功，已将 ${migration.migrated} 局本地棋局保存到账号${migration.failed?`，另有 ${migration.failed} 局待重试`:''}`:migration.failed?`登录成功，${migration.failed} 局本地棋局暂未同步，请稍后重试`:'登录成功'
   }catch(error){emailAuthError.value=error instanceof Error?error.message:'邮箱登录失败'}finally{emailAuthBusy.value=false}
 }
 async function resendVerification(){emailAuthBusy.value=true;emailAuthError.value='';try{await requestEmailVerification(emailAuthEmail.value);emailAuthNotice.value='如果该邮箱尚未验证，验证邮件已发送。'}catch(error){emailAuthError.value=error instanceof Error?error.message:'发送失败'}finally{emailAuthBusy.value=false}}
-async function acceptCurrentPrivacy(){privacyBusy.value=true;try{await acceptPrivacy(privacyConfig.value.policy_version);privacyAccepted.value=false;await loadServerGames();message.value='隐私政策已确认'}catch(error){message.value=error instanceof Error?error.message:'确认失败'}finally{privacyBusy.value=false}}
+async function acceptCurrentPrivacy(){privacyBusy.value=true;try{await acceptPrivacy(privacyConfig.value.policy_version);privacyAccepted.value=false;const migration=await loadServerGames();message.value=migration.migrated?`隐私政策已确认，已将 ${migration.migrated} 局本地棋局保存到账号${migration.failed?`，另有 ${migration.failed} 局待重试`:''}`:migration.failed?`隐私政策已确认，${migration.failed} 局本地棋局暂未同步，请稍后重试`:'隐私政策已确认'}catch(error){message.value=error instanceof Error?error.message:'确认失败'}finally{privacyBusy.value=false}}
 async function restoreAccount(){try{await cancelDeletion();await loadServerGames();message.value='账号删除已取消'}catch(error){message.value=error instanceof Error?error.message:'取消删除失败'}}
 async function processEmailAction(){const params=new URLSearchParams(window.location.hash.slice(1));const action=params.get('email_action'),token=params.get('token');if(!token||!action)return;window.history.replaceState({},'',window.location.pathname);if(action==='reset'){emailActionToken.value=token;emailAuthTab.value='reset';emailAuthOpen.value=true;return}if(action==='verify'){try{await verifyEmail(token);message.value='邮箱验证成功，请登录';emailAuthTab.value='login';emailAuthOpen.value=true}catch(error){message.value=error instanceof Error?error.message:'验证链接无效'}}}
 async function logoutCurrent(){await logout();currentUser.value=null;savedGames.value=[];currentGameId.value=null;message.value='已退出登录'}
