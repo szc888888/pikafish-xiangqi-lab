@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, deleteGame, engineMove, forgotPassword, getAuthMethods, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, loginEmail, logout, persistReview, recognizeSetupImage, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, verifyEmail, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
+import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, deleteGame, engineMove, forgotPassword, getAuthMethods, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, importGame, loginEmail, logout, persistReview, recognizeSetupImage, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, verifyEmail, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
+import { migrateLegacyGames } from './lib/legacyGameMigration'
 import { applyMove, clonePosition, describeUci, fromUci, legalTargets, movePiece, parseFen, perpetualCheckSide, perpetualChaseSide, setPiece, START_FEN, toFen, toUci, validateSetupPosition, type Piece, type Position } from './lib/xiangqi'
 import { listRecognizedPieces } from './lib/recognitionPositions'
 import { recognitionControls } from './lib/recognitionState'
@@ -219,19 +220,15 @@ function serverGameRecord(game:PersistedGame):SavedGame{
 function gameEngineSettings(game:SavedGame):PersistedEngineSettings{return{difficulty:game.difficulty,allow_suboptimal:game.difficultySettings.allow_suboptimal,depth:game.difficultySettings.depth,movetime_ms:game.difficultySettings.movetime_ms,threads:game.difficultySettings.threads,hash_mb:game.difficultySettings.hash_mb}}
 interface GameMigrationResult { migrated:number; failed:number }
 async function migrateLocalGames():Promise<GameMigrationResult>{
-  let migrated=0,failed=0
-  const guestGames=savedGames.value.filter(game=>game.serverVersion===undefined)
-  for(const game of guestGames){
+  const imported=await migrateLegacyGames(savedGames.value,async(game)=>{
     const localId=game.id
-    try{
-      const remote=await createGame({name:game.name||undefined,initial_fen:game.baseFen,engine_settings:gameEngineSettings(game)})
-      game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length
-      if(currentGameId.value===localId)currentGameId.value=remote.id
-      persistGames()
-      await syncCurrentGame(game)
-      migrated++
-    }catch{if(game.serverVersion===undefined)failed++}
-  }
+    const remote=await importGame({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game)})
+    game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length
+    if(currentGameId.value===localId)currentGameId.value=remote.id
+    persistGames()
+    return remote
+  })
+  let migrated=imported.imported.length,failed=imported.failed.length
   const partialGames=savedGames.value.filter(game=>game.serverVersion!==undefined&&(game.syncedMoves??0)<game.moves.length)
   for(const game of partialGames){
     try{await syncCurrentGame(game);migrated++}catch{failed++}

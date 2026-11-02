@@ -80,7 +80,12 @@ def _safe_scalar(value: Any, field: str) -> str:
 
 def _populate_safe_fields(record: logging.LogRecord) -> None:
     for field in _SAFE_FIELDS:
-        setattr(record, field, _safe_scalar(getattr(record, field, None), field))
+        value = getattr(record, field, None)
+        # Keep process ids numeric for structured log consumers; the formatter
+        # already stringifies values when rendering text logs.
+        if field == "pid" and isinstance(value, int) and not isinstance(value, bool):
+            continue
+        setattr(record, field, _safe_scalar(value, field))
     event = getattr(record, "event", None)
     record.event = event if isinstance(event, str) and _EVENT_NAME.fullmatch(event) else "application.event"
     record.request_id = _safe_scalar(

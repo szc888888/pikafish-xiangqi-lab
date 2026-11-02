@@ -79,9 +79,11 @@ class PrivacyConsent(Base):
 
 class Game(Base):
     __tablename__ = "games"
+    __table_args__ = (UniqueConstraint("user_id", "legacy_id", name="uq_game_user_legacy_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     initial_fen: Mapped[str] = mapped_column(String(220))
     current_fen: Mapped[str] = mapped_column(String(220))

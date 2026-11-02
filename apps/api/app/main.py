@@ -23,7 +23,7 @@ from .logging_config import REQUEST_ID_HEADER, configure_logging, get_logger, re
 from .engine import EngineRuleViolation, EngineUnavailable, PikafishEngine
 from .engine_strength import profile_for, select_candidate
 from .llm import LLMUnavailable, VisionRecognitionError, coach_chat, explain, recognize_board_image
-from .models import CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, GameMoveResponse, GameResponse, GameUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
+from .models import CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
 from .auth import get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
@@ -32,8 +32,8 @@ from .persistence import DataRequest, DeletionTombstone, Game, GameMove, LocalCr
 from .deletion_ledger import export_artifact_path, purge_expired_deletions, purge_expired_exports
 from .openings import lookup_openings
 from .review import review_game
-from .xiangqi import Position, describe_uci, resolve_move_position, validate_candidate, validate_fen, validate_history, validate_moves
-from sqlalchemy import select
+from .xiangqi import Position, describe_uci, resolve_move_position, terminal_status, validate_candidate, validate_fen, validate_history, validate_moves
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
 from . import oidc
 
@@ -201,6 +201,36 @@ def _position_to_fen(position: Position) -> str:
             output += str(empty)
         rows.append(output)
     return "/".join(rows) + (" w" if position.red_to_move else " b") + " - - 0 1"
+
+
+def _same_position_as_fen(position: Position, fen: str) -> bool:
+    try:
+        cached = validate_fen(fen)
+    except ValueError:
+        return False
+    return cached.board == position.board and cached.red_to_move == position.red_to_move
+
+
+def _validate_game_projection(game: Game, history) -> None:
+    if history.issue:
+        raise _api_error(409, "game_history_invalid", f"已保存棋谱第 {history.issue.ply} 步无效: {history.issue.message}")
+    if len(history.positions) != len(game.moves) + 1:
+        raise _api_error(409, "game_projection_mismatch", "棋谱与当前棋局缓存不一致，请修复或重新导入棋局")
+    for index, move in enumerate(game.moves):
+        before, after = history.positions[index], history.positions[index + 1]
+        expected_side = "red" if before.red_to_move else "black"
+        if (
+            move.ply != index + 1
+            or move.side != expected_side
+            or not _same_position_as_fen(before, move.before_fen)
+            or not _same_position_as_fen(after, move.after_fen)
+            or move.notation_zh != describe_uci(before, move.uci)
+        ):
+            raise _api_error(409, "game_projection_mismatch", "棋谱快照与规则重放结果不一致，请修复或重新导入棋局")
+    final = history.positions[-1]
+    expected_status = "finished" if terminal_status(final) else "active"
+    if not _same_position_as_fen(final, game.current_fen) or final.red_to_move != game.red_to_move or game.status != expected_status:
+        raise _api_error(409, "game_projection_mismatch", "当前局面与规则重放结果不一致，请修复或重新导入棋局")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -371,6 +401,8 @@ async def logout(request: Request) -> dict:
 @app.get("/api/games", response_model=list[GameResponse])
 async def list_games(user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> list[GameResponse]:
     games = db.scalars(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.deleted_at.is_(None)).order_by(Game.updated_at.desc())).all()
+    for game in games:
+        _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]))
     return [_game_response(game) for game in games]
 
 
@@ -382,16 +414,69 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
         position = validate_fen(payload.initial_fen)
     except ValueError as exc:
         raise _api_error(400, "invalid_fen", str(exc)) from exc
-    game = Game(user_id=user.id, name=payload.name, initial_fen=payload.initial_fen.strip(), current_fen=payload.initial_fen.strip(), red_to_move=position.red_to_move, engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump())
+    game = Game(user_id=user.id, name=payload.name, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump())
     db.add(game)
     db.commit()
     db.refresh(game)
     return _game_response(game)
 
 
+@app.post("/api/games/import", response_model=GameResponse, status_code=201)
+async def import_legacy_game(payload: LegacyGameImportRequest, response: Response, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+    if user.status != "active":
+        raise _api_error(410, "account_unavailable", "账号正在删除或已删除")
+    try:
+        history = validate_history(payload.initial_fen, payload.moves)
+    except ValueError as exc:
+        raise _api_error(400, "invalid_fen", str(exc)) from exc
+    if history.issue:
+        code = "rule_violation" if history.issue.code in {"perpetual_check", "perpetual_chase"} else "invalid_move_history"
+        raise _api_error(422, code, f"第 {history.issue.ply} 步无效: {history.issue.message}")
+
+    existing = db.scalar(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.legacy_id == payload.legacy_id))
+    if existing:
+        same_history = existing.initial_fen.strip() == payload.initial_fen.strip() and [move.uci for move in existing.moves] == payload.moves
+        if not same_history:
+            raise _api_error(409, "legacy_game_conflict", "该本地棋局编号已导入为其他棋谱")
+        _validate_game_projection(existing, validate_history(existing.initial_fen, [move.uci for move in existing.moves]))
+        response.status_code = 200
+        return _game_response(existing)
+
+    final = history.positions[-1]
+    game = Game(
+        user_id=user.id,
+        legacy_id=payload.legacy_id,
+        name=payload.name,
+        initial_fen=payload.initial_fen.strip(),
+        current_fen=_position_to_fen(final),
+        red_to_move=final.red_to_move,
+        status="finished" if terminal_status(final) else "active",
+        version=len(payload.moves),
+        engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(),
+    )
+    db.add(game)
+    db.flush()
+    for index, move in enumerate(payload.moves):
+        before, after = history.positions[index], history.positions[index + 1]
+        db.add(GameMove(
+            game_id=game.id,
+            ply=index + 1,
+            side="red" if before.red_to_move else "black",
+            uci=move,
+            notation_zh=describe_uci(before, move),
+            before_fen=_position_to_fen(before),
+            after_fen=_position_to_fen(after),
+        ))
+    db.commit()
+    db.refresh(game)
+    return _game_response(_owned_game(db, user, game.id))
+
+
 @app.get("/api/games/{game_id}", response_model=GameResponse)
 async def get_game(game_id: str, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
-    return _game_response(_owned_game(db, user, game_id))
+    game = _owned_game(db, user, game_id)
+    _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]))
+    return _game_response(game)
 
 
 @app.patch("/api/games/{game_id}", response_model=GameResponse)
@@ -411,26 +496,41 @@ async def append_move(game_id: str, payload: MoveCreateRequest, user: User = Dep
     game = _owned_game(db, user, game_id)
     if game.version != payload.expected_version:
         raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
+    if game.status == "finished":
+        raise _api_error(409, "game_finished", "棋局已经结束，不能继续落子")
     moves = [move.uci for move in game.moves]
+    current_history = validate_history(game.initial_fen, moves)
+    _validate_game_projection(game, current_history)
     history = validate_history(game.initial_fen, [*moves, payload.uci])
     if history.issue:
         code = "rule_violation" if history.issue.code in {"perpetual_check", "perpetual_chase"} else "invalid_move"
         raise _api_error(422, code, f"第 {history.issue.ply} 步无效: {history.issue.message}")
-    before = history.positions[-2]
+    before = current_history.positions[-1]
     after = history.positions[-1]
     before_fen = _position_to_fen(before)
     after_fen = _position_to_fen(after)
     move = GameMove(game_id=game.id, ply=len(game.moves) + 1, side="red" if before.red_to_move else "black", uci=payload.uci, notation_zh=describe_uci(before, payload.uci), before_fen=before_fen, after_fen=after_fen)
-    game.current_fen = after_fen
-    game.red_to_move = after.red_to_move
+    values = {
+        "current_fen": after_fen,
+        "red_to_move": after.red_to_move,
+        "status": "finished" if terminal_status(after) else "active",
+        "version": payload.expected_version + 1,
+        "updated_at": datetime.now(timezone.utc),
+    }
     if payload.engine_settings is not None:
-        game.engine_settings = _normalized_engine_settings(payload.engine_settings).model_dump()
-    game.version += 1
-    if history.positions[-1].red_to_move == before.red_to_move:
-        game.status = "finished"
+        values["engine_settings"] = _normalized_engine_settings(payload.engine_settings).model_dump()
+    changed = db.execute(
+        update(Game)
+        .where(Game.id == game.id, Game.user_id == user.id, Game.version == payload.expected_version, Game.deleted_at.is_(None))
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if changed != 1:
+        db.rollback()
+        raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
     db.add(move)
     db.commit()
-    db.refresh(game)
+    db.expire_all()
     return _game_response(_owned_game(db, user, game.id))
 
 
@@ -713,6 +813,7 @@ async def persist_review(game_id: str, request: ReviewRequest, user: User = Depe
     game = _owned_game(db, user, game_id)
     if request.fen.strip() != game.initial_fen.strip() or [move.uci for move in game.moves] != request.moves:
         raise _api_error(409, "game_snapshot_mismatch", "复盘棋谱与当前棋局不一致，请重新加载棋局")
+    _validate_game_projection(game, validate_history(game.initial_fen, request.moves))
     try:
         cpu_count = os.cpu_count() or 1
         if request.threads > cpu_count:
@@ -724,11 +825,13 @@ async def persist_review(game_id: str, request: ReviewRequest, user: User = Depe
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     canonical = json.dumps({"fen": request.fen.strip(), "moves": request.moves}, ensure_ascii=False, separators=(",", ":"))
     snapshot_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    saved = Review(game_id=game.id, user_id=user.id, game_version=game.version, initial_fen_snapshot=request.fen.strip(), moves_snapshot=request.moves, history_hash=snapshot_hash, engine_name="Pikafish", parameters=request.model_dump(), status=result.status, summary=result.stop.message if result.stop else None, error_code=result.stop.kind if result.stop else None, completed_at=datetime.now(timezone.utc))
+    saved = Review(game_id=game.id, user_id=user.id, game_version=game.version, initial_fen_snapshot=request.fen.strip(), moves_snapshot=request.moves, history_hash=snapshot_hash, engine_name="Pikafish", engine_version=engine.engine_version, nnue_version=engine.nnue_version, parameters=request.model_dump(), status=result.status, summary=result.stop.message if result.stop else None, error_code=result.stop.kind if result.stop else None, completed_at=datetime.now(timezone.utc))
     db.add(saved)
     db.flush()
     for item in result.items:
-        db.add(ReviewItem(review_id=saved.id, ply=item.ply, side=item.side, move=item.move, best_move=item.best_move, before_score=item.before_score.model_dump() if item.before_score else None, after_score=item.after_score.model_dump() if item.after_score else None, loss_cp=item.loss_cp, grade=item.grade, pv=item.pv))
+        db.add(ReviewItem(review_id=saved.id, ply=item.ply, side=item.side, move=item.move, best_move=item.best_move, before_score=item.before_score.model_dump() if item.before_score else None, after_score=item.after_score.model_dump() if item.after_score else None, loss_cp=item.loss_cp, mate_value=(item.after_score.value if item.after_score and item.after_score.type == "mate" else None), grade=item.grade, pv=item.pv))
+    if result.stop and 1 <= result.stop.ply <= len(request.moves):
+        db.add(ReviewItem(review_id=saved.id, ply=result.stop.ply, side=result.stop.side, move=request.moves[result.stop.ply - 1], grade="unknown", pv=[], rule_stop_kind=result.stop.kind, rule_stop_message=result.stop.message))
     db.commit()
     return PersistedReviewResponse(review_id=saved.id, game_id=game.id, snapshot_hash=snapshot_hash, **result.model_dump())
 
@@ -738,7 +841,7 @@ async def get_persisted_review(review_id: str, user: User = Depends(get_consente
     review = db.scalar(select(Review).options(selectinload(Review.items)).where(Review.id == review_id, Review.user_id == user.id))
     if review is None:
         raise _api_error(404, "review_not_found", "复盘不存在")
-    return {"id": review.id, "game_id": review.game_id, "status": review.status, "initial_fen": review.initial_fen_snapshot, "moves": review.moves_snapshot, "history_hash": review.history_hash, "items": [{"ply": item.ply, "side": item.side, "move": item.move, "best_move": item.best_move, "before_score": item.before_score, "after_score": item.after_score, "loss_cp": item.loss_cp, "grade": item.grade, "pv": item.pv} for item in review.items]}
+    return {"id": review.id, "game_id": review.game_id, "status": review.status, "initial_fen": review.initial_fen_snapshot, "moves": review.moves_snapshot, "history_hash": review.history_hash, "engine_name": review.engine_name, "engine_version": review.engine_version, "nnue_version": review.nnue_version, "parameters": review.parameters, "summary": review.summary, "error_code": review.error_code, "items": [{"ply": item.ply, "side": item.side, "move": item.move, "best_move": item.best_move, "before_score": item.before_score, "after_score": item.after_score, "loss_cp": item.loss_cp, "mate_value": item.mate_value, "grade": item.grade, "pv": item.pv, "rule_stop_kind": item.rule_stop_kind, "rule_stop_message": item.rule_stop_message} for item in review.items]}
 
 
 @app.post("/api/openings", response_model=OpeningsResponse)

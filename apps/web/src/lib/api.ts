@@ -210,6 +210,7 @@ export const beginOidcLogin = () => { window.location.href = '/auth/oidc/start' 
 export const logout = () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' })
 export const getGames = () => request<PersistedGame[]>('/api/games')
 export const createGame = (payload: { name?: string; initial_fen: string; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
+export const importGame = (payload: { legacy_id: string; name?: string; initial_fen: string; moves: string[]; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>('/api/games/import', { method: 'POST', body: JSON.stringify(payload) })
 export const appendGameMove = (id: string, payload: { expected_version: number; uci: string; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>(`/api/games/${encodeURIComponent(id)}/moves`, { method: 'POST', body: JSON.stringify(payload) })
 export const deleteGame = (id: string) => request<void>(`/api/games/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const requestExport = () => request<DataRequest>('/api/me/exports', { method: 'POST' })

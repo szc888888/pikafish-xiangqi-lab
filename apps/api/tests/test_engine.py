@@ -23,6 +23,14 @@ def test_parse_uci_info_line():
     assert parsed["pv"] == ["h2e2", "b9c7"]
 
 
+def test_engine_metadata_uses_uci_identity_and_nnue_content_hash(tmp_path):
+    model = tmp_path / "pikafish.nnue"
+    model.write_bytes(b"test model payload")
+    assert PikafishEngine._engine_version_from_uci(["id name Pikafish dev-test", "uciok"]) == "Pikafish dev-test"
+    assert PikafishEngine._hash_nnue(str(model)) == "sha256:bae77ae8633e61e7906d62148fecbf0f322507fe9b145afb5e3081af6b0e8b88"
+    assert PikafishEngine._hash_nnue("") is None
+
+
 def test_engine_is_safe_when_binary_is_missing(monkeypatch, tmp_path):
     monkeypatch.setenv("PIKAFISH_PATH", str(tmp_path / "missing.exe"))
     engine = PikafishEngine()

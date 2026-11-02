@@ -132,8 +132,11 @@ class ReviewItem(BaseModel):
     before_score: Score | None = None
     after_score: Score | None = None
     loss_cp: int | None = None
+    mate_value: int | None = None
     grade: Literal["good", "inaccuracy", "mistake", "blunder", "unknown"]
     pv: list[str] = Field(default_factory=list)
+    rule_stop_kind: Literal["perpetual_check", "perpetual_chase"] | None = None
+    rule_stop_message: str | None = None
 
 
 class ReviewStop(BaseModel):
@@ -207,6 +210,14 @@ class SavedEngineSettings(BaseModel):
 class GameCreateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     initial_fen: str = Field(min_length=1, max_length=200)
+    engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
+
+
+class LegacyGameImportRequest(BaseModel):
+    legacy_id: str = Field(min_length=1, max_length=200)
+    name: str | None = Field(default=None, max_length=120)
+    initial_fen: str = Field(min_length=1, max_length=200)
+    moves: list[str] = Field(default_factory=list, max_length=400)
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
 
 

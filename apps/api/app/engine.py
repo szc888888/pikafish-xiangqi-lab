@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -61,6 +62,8 @@ class PikafishEngine:
         self.process: asyncio.subprocess.Process | None = None
         self.lock = asyncio.Lock()
         self.last_error: str | None = None
+        self.engine_version: str | None = None
+        self.nnue_version: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -99,7 +102,9 @@ class PikafishEngine:
                 event="engine.handshake", phase=phase, pid=pid, outcome="started"
             ))
             await self._send("uci")
-            await self._wait_for("uciok")
+            uci_lines = await self._wait_for("uciok")
+            self.engine_version = self._engine_version_from_uci(uci_lines)
+            self.nnue_version = self._hash_nnue(self.eval_file)
             if self.eval_file:
                 await self._send(f"setoption name EvalFile value {self.eval_file}")
             phase = "isready"
@@ -177,6 +182,23 @@ class PikafishEngine:
             lines.append(line)
             if token in line:
                 return lines
+
+    @staticmethod
+    def _engine_version_from_uci(lines: list[str]) -> str | None:
+        return next((line[len("id name "):].strip() for line in lines if line.startswith("id name ") and line[len("id name "):].strip()), None)
+
+    @staticmethod
+    def _hash_nnue(path: str) -> str | None:
+        if not path:
+            return None
+        file_path = Path(path)
+        if not file_path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with file_path.open("rb") as model_file:
+            for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
 
     async def analyze(
         self,
