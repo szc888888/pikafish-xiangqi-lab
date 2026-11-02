@@ -1,0 +1,15 @@
+.git
+.env
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+logs
+backups
+exports
+engine/*.exe
+engine/*.nnue
+engine/linux-x86-64
+engine/Pikafish
+engine/Pikafish.*.7z

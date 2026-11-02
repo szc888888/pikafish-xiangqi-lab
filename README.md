@@ -115,6 +115,29 @@ cd D:\chess
 .\start.ps1 -DryRun
 ```
 
+### Docker 本机启动
+
+Docker Compose 启动 API 和前端两个容器，并连接 `.env` 中 `DATABASE_URL` 指定的 PostgreSQL。它会复用已经运行的数据库，不会再创建 PostgreSQL 容器。Pikafish 由 API 按需启动，不是单独的容器服务。原有 `start.ps1` 仍用于本机 Python/npm 开发。
+
+确保 Docker Desktop 正在运行。首次启动或更新代码后，在项目根目录构建 API 镜像并应用数据库迁移；已有数据库请先备份：
+
+```powershell
+docker compose build api
+docker compose run --rm --no-deps api alembic upgrade head
+```
+
+首次启动时，`start-docker.ps1` 会自动安装 Linux 引擎，然后启动 API 和前端：
+
+```powershell
+.\start-docker.ps1
+```
+
+Linux 引擎已安装且数据库迁移完成后，也可以直接运行 `docker compose up --build -d`。前端地址是 <http://127.0.0.1:1240>，API 健康检查地址是 <http://127.0.0.1:8010/api/health>。Docker 版使用独立端口，可以和原来的 `start.ps1` 并行运行。查看容器状态和日志可运行 `docker compose ps`、`docker compose logs -f`；停止本项目容器运行 `docker compose down`，不会停止 PostgreSQL。
+
+API 容器必须能访问 `.env` 中 `DATABASE_URL` 指定的地址。若 PostgreSQL 在这台电脑的 Docker 容器中，连接地址的主机名应使用 `host.docker.internal`，例如 `postgresql+psycopg://postgres:<password>@host.docker.internal:5432/chess`；不要在容器连接地址中使用 `localhost`。
+
+Docker 模式默认只绑定本机地址，使用开发配置，不应用作生产部署。`start-docker.ps1` 会检查 Docker 是否使用 Linux x86-64 容器；如果缺少 Linux 引擎或 NNUE，它会从 Pikafish 官方 Releases 下载并安装匹配文件到 `engine/linux-x86-64/`，然后启动 API 和前端。首次使用需要能够访问 GitHub。启动时 API 容器会复制引擎到容器内并设置执行权限，因此宿主机现有的 Windows `pikafish.exe` 不会影响 Docker 分析。安装脚本及手动安装步骤见 [引擎目录说明](engine/README.md)。
+
 也可以分别启动，便于调试：
 
 ```powershell
@@ -133,7 +156,7 @@ npm run dev
 
 ## 生产部署流程
 
-仓库没有 Docker Compose、生产进程管理器或反向代理配置。下面是部署步骤和边界；需由部署环境提供 HTTPS、静态文件服务、进程守护和 PostgreSQL 运维。
+仓库提供本机开发用的 Docker Compose 启动方式，但不包含生产 Docker、进程管理器或反向代理配置。下面是生产部署步骤和边界；需由部署环境提供 HTTPS、静态文件服务、进程守护和 PostgreSQL 运维。
 
 1. **准备运行环境**：部署前端静态文件和 API 到受控主机；安装 Python 3.11+、Node.js 构建环境、PostgreSQL 客户端工具，以及与服务器平台匹配的 Pikafish 和 NNUE。
 2. **准备 PostgreSQL**：创建独立数据库和权限受限的服务账号；配置防火墙、网络访问和定期维护。不要在公网暴露数据库端口。

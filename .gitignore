@@ -6,6 +6,7 @@ __pycache__/
 .env
 engine/*.exe
 engine/*.nnue
+engine/linux-x86-64/
 logs/
 apps/api/logs/
 backups/

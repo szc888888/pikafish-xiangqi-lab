@@ -1,0 +1,55 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    working_dir: /workspace/apps/api
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        mkdir -p /opt/pikafish &&
+        cp /engine/pikafish /opt/pikafish/pikafish &&
+        chmod 755 /opt/pikafish/pikafish &&
+        cp /engine/pikafish.nnue /opt/pikafish/pikafish.nnue &&
+        exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: development
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in the project root .env file}
+      SESSION_SECRET: ${SESSION_SECRET:-local-docker-session-secret-change-me}
+      PIKAFISH_PATH: /opt/pikafish/pikafish
+      PIKAFISH_EVAL_FILE: /opt/pikafish/pikafish.nnue
+      EXPORT_ROOT: /workspace/exports
+      DELETION_LEDGER_PATH: /workspace/backups/deletion-ledger.jsonl
+    ports:
+      - "127.0.0.1:8010:8000"
+    volumes:
+      - ./apps/api:/workspace/apps/api
+      - ./engine/linux-x86-64:/engine:ro
+      - ./exports:/workspace/exports
+      - ./backups:/workspace/backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    working_dir: /workspace/apps/web
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    environment:
+      VITE_HOST: 0.0.0.0
+      API_PROXY_TARGET: http://api:8000
+    ports:
+      - "127.0.0.1:1240:1239"
+    volumes:
+      - ./apps/web:/workspace/apps/web
+      - web_node_modules:/workspace/apps/web/node_modules
+    depends_on:
+      - api
+
+volumes:
+  web_node_modules:

@@ -1,7 +1,9 @@
-[CmdletBinding(SupportsShouldProcess = $true)]
+﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$Version = 'latest',
     [string]$InstallDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine'),
+    [ValidateSet('Windows', 'Linux')]
+    [string]$Platform = 'Windows',
     [switch]$Force
 )
 
@@ -31,7 +33,13 @@ if ($archiveAssets.Count -ne 1) {
 }
 
 $targetDirectory = [IO.Path]::GetFullPath($InstallDirectory)
-$engineTarget = Join-Path $targetDirectory 'pikafish.exe'
+$engineNamePattern = if ($Platform -eq 'Linux') {
+    '^Pikafish-Linux-x86-64-universal$'
+} else {
+    '^Pikafish-Windows-x86-64-universal\.exe$'
+}
+$engineTargetName = if ($Platform -eq 'Linux') { 'pikafish' } else { 'pikafish.exe' }
+$engineTarget = Join-Path $targetDirectory $engineTargetName
 $networkTarget = Join-Path $targetDirectory 'pikafish.nnue'
 $existingTargets = @($engineTarget, $networkTarget) | Where-Object { Test-Path -LiteralPath $_ }
 if ($existingTargets.Count -gt 0 -and -not $Force) {
@@ -60,20 +68,32 @@ try {
     [IO.Directory]::CreateDirectory($extractDirectory) | Out-Null
 
     Write-Output "下载 Pikafish $($release.tag_name)：$($asset.name)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -Headers @{ 'User-Agent' = $headers['User-Agent'] } -TimeoutSec 180
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) { throw '找不到 curl.exe；请安装较新的 Windows 10/11，或手动下载官方发布包。' }
+    & $curl.Source --location --fail --silent --show-error --connect-timeout 30 --max-time 180 --output $archivePath $asset.browser_download_url
+    if ($LASTEXITCODE -ne 0) { throw "下载官方发布包失败，curl.exe 退出码：$LASTEXITCODE" }
     if (-not (Test-Path -LiteralPath $archivePath) -or (Get-Item -LiteralPath $archivePath).Length -lt 1MB) {
         throw '下载文件不存在或大小异常。'
     }
 
-    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
-    if (-not $tar) { throw '找不到 Windows tar.exe；请使用较新的 Windows 10/11，或先安装支持 7z 的 tar。' }
-    & $tar.Source -xf $archivePath -C $extractDirectory
-    if ($LASTEXITCODE -ne 0) { throw "解压官方 .7z 文件失败，tar.exe 退出码：$LASTEXITCODE" }
+    $archiver = Get-Command 7z.exe,7zz.exe,7za.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($archiver) {
+        & $archiver.Source x -y "-o$extractDirectory" $archivePath
+    } else {
+        $sevenZipPath = Join-Path $tempDirectory '7zr.exe'
+        Write-Output '未找到 7-Zip 命令行程序，正在从 7-Zip 官方 Releases 下载临时解压工具。'
+        & $curl.Source --location --fail --silent --show-error --connect-timeout 30 --max-time 60 --output $sevenZipPath 'https://github.com/ip7z/7zip/releases/latest/download/7zr.exe'
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sevenZipPath) -or (Get-Item -LiteralPath $sevenZipPath).Length -lt 100KB) {
+            throw '无法获取 7-Zip 官方解压工具；请安装 7-Zip 后重试。'
+        }
+        & $sevenZipPath x -y "-o$extractDirectory" $archivePath
+    }
+    if ($LASTEXITCODE -ne 0) { throw "解压官方 .7z 文件失败，解压程序退出码：$LASTEXITCODE" }
 
-    $engineCandidates = @(Get-ChildItem -LiteralPath $extractDirectory -Recurse -File | Where-Object { $_.Name -match '^Pikafish-Windows-x86-64-universal\.exe$' })
+    $engineCandidates = @(Get-ChildItem -LiteralPath $extractDirectory -Recurse -File | Where-Object { $_.Name -match $engineNamePattern })
     $networkCandidates = @(Get-ChildItem -LiteralPath $extractDirectory -Recurse -File | Where-Object { $_.Name -ieq 'pikafish.nnue' })
     if ($engineCandidates.Count -ne 1 -or $networkCandidates.Count -ne 1) {
-        throw "发布包内容与预期不符；需要 Windows x86-64 universal 引擎和一个 pikafish.nnue，未修改安装目录。"
+        throw "发布包内容与预期不符；需要 $Platform x86-64 universal 引擎和一个 pikafish.nnue，未修改安装目录。"
     }
     if ($engineCandidates[0].Length -lt 1MB -or $networkCandidates[0].Length -lt 1MB) {
         throw '引擎或 NNUE 文件大小异常，未修改安装目录。'
@@ -83,7 +103,7 @@ try {
     Copy-Item -LiteralPath $engineCandidates[0].FullName -Destination $engineTarget -Force
     Copy-Item -LiteralPath $networkCandidates[0].FullName -Destination $networkTarget -Force
 
-    Write-Output "Pikafish $($release.tag_name) 已安装："
+    Write-Output "Pikafish $($release.tag_name) ($Platform x86-64) 已安装："
     Write-Output "  引擎：$engineTarget"
     Write-Output "  网络：$networkTarget"
 } finally {
