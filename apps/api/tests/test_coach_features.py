@@ -305,8 +305,8 @@ def test_review_grade_thresholds_and_mate_loss():
     assert classify_loss(before, Score(type="cp", value=30)) == ("inaccuracy", 70)
     assert classify_loss(before, Score(type="cp", value=20)) == ("mistake", 80)
     assert classify_loss(before, Score(type="cp", value=-100)) == ("blunder", 200)
-    assert classify_loss(before, Score(type="mate", value=3)) == ("blunder", None)
-    assert classify_loss(before, Score(type="mate", value=-3)) == ("good", None)
+    assert classify_loss(before, Score(type="mate", value=3)) == ("good", None)
+    assert classify_loss(before, Score(type="mate", value=-3)) == ("blunder", None)
 
 
 def test_opening_library_matches_prefix_and_reports_deviation():

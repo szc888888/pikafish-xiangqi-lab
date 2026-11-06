@@ -162,15 +162,15 @@ def test_register_and_login_emit_structured_auth_events(monkeypatch):
         register = next(record for record in events if record.event == "auth.register")
         login = next(record for record in events if record.event == "auth.login")
         assert register.outcome == "success"
-        assert register.status == "201"
+        assert int(register.status) == 201
         assert register.email_fingerprint
         assert register.user_id
         assert login.outcome == "success"
-        assert login.status == "200"
+        assert int(login.status) == 200
         assert login.email_fingerprint == register.email_fingerprint
         assert login.user_id == register.user_id
         failure = next(record for record in events if record.event == "auth.login" and record.outcome == "failure")
-        assert failure.status == "401"
+        assert int(failure.status) == 401
         assert failure.reason_code == "invalid_credentials"
         assert not any("password" in record.__dict__ or "wrong secret" in record.getMessage() or "alice@example.com" in record.getMessage() for record in events)
     finally:

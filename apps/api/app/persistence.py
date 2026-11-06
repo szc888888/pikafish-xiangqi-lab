@@ -88,6 +88,7 @@ class Game(Base):
     initial_fen: Mapped[str] = mapped_column(String(220))
     current_fen: Mapped[str] = mapped_column(String(220))
     engine_settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    events: Mapped[list | None] = mapped_column(JSON, nullable=True)
     red_to_move: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     version: Mapped[int] = mapped_column(Integer, default=0)

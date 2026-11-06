@@ -211,6 +211,7 @@ class GameCreateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     initial_fen: str = Field(min_length=1, max_length=200)
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
+    events: list[dict] = Field(default_factory=list, max_length=1000)
 
 
 class LegacyGameImportRequest(BaseModel):
@@ -219,12 +220,18 @@ class LegacyGameImportRequest(BaseModel):
     initial_fen: str = Field(min_length=1, max_length=200)
     moves: list[str] = Field(default_factory=list, max_length=400)
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
+    events: list[dict] = Field(default_factory=list, max_length=1000)
 
 
 class MoveCreateRequest(BaseModel):
     expected_version: int = Field(ge=0)
     uci: str = Field(min_length=4, max_length=8)
     engine_settings: SavedEngineSettings | None = None
+
+
+class GameEventsUpdateRequest(BaseModel):
+    expected_version: int = Field(ge=0)
+    events: list[dict] = Field(default_factory=list, max_length=1000)
 
 
 class GameUpdateRequest(BaseModel):
@@ -253,6 +260,7 @@ class GameResponse(BaseModel):
     updated_at: str
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
     moves: list[GameMoveResponse] = Field(default_factory=list)
+    events: list[dict] = Field(default_factory=list)
 
 
 class DataRequestResponse(BaseModel):

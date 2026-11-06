@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { ReviewResponse, ReviewItem } from '../lib/api'
 import { computed, ref } from 'vue'
+import ReviewSummary from './ReviewSummary.vue'
+import { keyMoments, type ReviewSide } from '../lib/reviewSummary'
 
-const props = defineProps<{ result: ReviewResponse | null; busy: boolean; error: string; selectedPly: number | null }>()
+const props = defineProps<{ result: ReviewResponse | null; busy: boolean; error: string; selectedPly: number | null; side?: ReviewSide }>()
 const emit = defineEmits<{ start: []; select: [item: ReviewItem]; coach: [item: ReviewItem] }>()
 const filter = ref('all')
 const filtered = computed(() => (props.result?.items ?? []).filter(item => filter.value === 'all' || item.grade === filter.value))
@@ -11,6 +13,7 @@ const names: Record<string, string> = { good: '正常 / 好棋', inaccuracy: '�
 
 <template>
   <section class="view-stack">
+    <ReviewSummary v-if="result" :moments="keyMoments(result.items, side ?? 'watch')" :selected-ply="selectedPly" @select="emit('select', $event)" @coach="emit('coach', $event)"/>
     <article class="card"><div class="card-title"><div><h2>逐步复盘</h2><p class="help">快速搜索，最多复盘最近 120 个半回合；分值不是胜率。</p></div><button class="primary compact" :disabled="busy" @click="emit('start')">{{ busy ? '复盘中…' : '开始复盘' }}</button></div><p v-if="error" class="validation">{{ error }}</p><p v-if="busy" class="help">正在逐局面分析，当前对局不会被修改。</p><div class="filter-row"><label>筛选<select v-model="filter"><option value="all">全部着法</option><option value="inaccuracy">可改进</option><option value="mistake">失误</option><option value="blunder">严重失误</option><option value="unknown">无法判断</option></select></label><span v-if="result">已分析 {{ result.analyzed_plies }} 半回合</span></div></article>
     <article v-if="result?.status === 'stopped_rule_violation' && result.stop" class="card warning-text">复盘在第 {{ result.stop.ply }} 半回合停止：{{ result.stop.message }}</article>
     <article v-for="item in filtered" :key="item.ply" class="review-item" :class="[{ active: selectedPly === item.ply }, `grade-${item.grade}`]" @click="emit('select', item)">

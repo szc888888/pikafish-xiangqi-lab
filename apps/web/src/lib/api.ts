@@ -13,7 +13,8 @@ export interface CoachMessage { role: 'user' | 'assistant'; content: string }
 export interface SetupImageResult { fen: string; red_to_move: boolean; piece_count: number; warnings: string[] }
 export interface PersistedGameMove { ply: number; side: 'red' | 'black'; uci: string; notation_zh: string; before_fen: string; after_fen: string }
 export interface PersistedEngineSettings { difficulty: 'companion' | 'beginner' | 'progress' | 'serious' | 'full' | 'custom'; allow_suboptimal: boolean; depth: number; movetime_ms: number; threads: number; hash_mb: number }
-export interface PersistedGame { id: string; name: string | null; initial_fen: string; current_fen: string; red_to_move: boolean; status: string; version: number; created_at: string; updated_at: string; engine_settings: PersistedEngineSettings; moves: PersistedGameMove[] }
+export interface PersistedGameEvent { id: string; type: 'undo' | 'hint'; createdAt: string; ply: number; positionMoves: string[]; positionFen: string; undoneMoves?: string[]; candidates?: { move: string; label: string; score: Score | null }[] }
+export interface PersistedGame { id: string; name: string | null; initial_fen: string; current_fen: string; red_to_move: boolean; status: string; version: number; created_at: string; updated_at: string; engine_settings: PersistedEngineSettings; moves: PersistedGameMove[]; events: PersistedGameEvent[] }
 export interface DataRequest { id: string; type: 'export' | 'delete'; status: string; expires_at: string | null; download_url: string | null }
 export interface AuthMethods { email: boolean; oidc: boolean; email_verification_required: boolean }
 export interface AuthUser { id: string; display_name: string | null; status: string; privacy_accepted?: boolean; policy_version?: string }
@@ -209,10 +210,11 @@ export const resetPassword = (token: string, password: string) => request<{ ok: 
 export const beginOidcLogin = () => { window.location.href = '/auth/oidc/start' }
 export const logout = () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' })
 export const getGames = () => request<PersistedGame[]>('/api/games')
-export const createGame = (payload: { name?: string; initial_fen: string; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
-export const importGame = (payload: { legacy_id: string; name?: string; initial_fen: string; moves: string[]; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>('/api/games/import', { method: 'POST', body: JSON.stringify(payload) })
+export const createGame = (payload: { name?: string; initial_fen: string; engine_settings?: PersistedEngineSettings; events?: PersistedGameEvent[] }) => request<PersistedGame>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
+export const importGame = (payload: { legacy_id: string; name?: string; initial_fen: string; moves: string[]; engine_settings?: PersistedEngineSettings; events?: PersistedGameEvent[] }) => request<PersistedGame>('/api/games/import', { method: 'POST', body: JSON.stringify(payload) })
 export const appendGameMove = (id: string, payload: { expected_version: number; uci: string; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>(`/api/games/${encodeURIComponent(id)}/moves`, { method: 'POST', body: JSON.stringify(payload) })
 export const deleteGame = (id: string) => request<void>(`/api/games/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export const updateGameEvents = (id: string, payload: { expected_version: number; events: PersistedGameEvent[] }) => request<PersistedGame>(`/api/games/${encodeURIComponent(id)}/events`, { method: 'PATCH', body: JSON.stringify(payload) })
 export const requestExport = () => request<DataRequest>('/api/me/exports', { method: 'POST' })
 export const requestDeletion = () => request<DataRequest>('/api/me/deletion', { method: 'POST' })
 export const cancelDeletion = () => request<DataRequest>('/api/me/deletion/cancel', { method: 'POST' })

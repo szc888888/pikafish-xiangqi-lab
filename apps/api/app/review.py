@@ -13,11 +13,15 @@ def classify_loss(before: Score | None, after_for_mover: Score | None) -> tuple[
     if before is None or after_for_mover is None:
         return "unknown", None
     if before.type == "mate" or after_for_mover.type == "mate":
-        # Scores are normalized to the player who just moved: positive mate
-        # means that player is getting mated, negative means they can mate.
-        if after_for_mover.type == "mate" and after_for_mover.value > 0:
-            return "blunder", None
+        # After normalization, positive mate favors the player who just moved;
+        # negative mate means the opponent can force mate (UCI convention).
+        if before.type == after_for_mover.type == "mate" and before.value < 0 and after_for_mover.value < 0:
+            # Already losing: mate distances from separate searches are not a
+            # reliable new loss, even when the move differs from the engine PV.
+            return "unknown", None
         if after_for_mover.type == "mate" and after_for_mover.value < 0:
+            return "blunder", None
+        if after_for_mover.type == "mate" and after_for_mover.value > 0:
             return "good", None
         return "unknown", None
     loss = max(0, before.value - after_for_mover.value)

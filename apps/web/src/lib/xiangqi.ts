@@ -136,6 +136,14 @@ export function legalTargets(position: Position, source: [number, number]): [num
   return pseudo(position, source).filter((target) => { const next = clonePosition(position); next.board[target[0]][target[1]] = piece; next.board[source[0]][source[1]] = '.'; return !isInCheck(next, red) })
 }
 
+// Mirrors the backend rule module: only absence of legal moves determines a terminal position.
+export function terminalStatus(position: Position): 'checkmate' | 'stalemate' | null {
+  for (let row = 0; row < 10; row++) for (let col = 0; col < 9; col++) {
+    if (colorOf(position.board[row][col]) === (position.redToMove ? 'red' : 'black') && legalTargets(position, [row, col]).length) return null
+  }
+  return isInCheck(position, position.redToMove) ? 'checkmate' : 'stalemate'
+}
+
 function repetitionKey(position: Position): string { return `${position.board.map((row) => row.join('')).join('/')} ${position.redToMove ? 'w' : 'b'}` }
 function materialKey(position: Position): string { return position.board.flat().filter((piece) => piece !== '.').sort().join('') }
 

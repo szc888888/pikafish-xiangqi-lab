@@ -23,7 +23,7 @@ from .logging_config import REQUEST_ID_HEADER, configure_logging, get_logger, re
 from .engine import EngineRuleViolation, EngineUnavailable, PikafishEngine
 from .engine_strength import profile_for, select_candidate
 from .llm import LLMUnavailable, VisionRecognitionError, coach_chat, explain, recognize_board_image
-from .models import CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
+from .models import CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
 from .auth import get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
@@ -110,11 +110,10 @@ async def unhandled_exception_response(request: Request, _: Exception) -> Respon
 async def validation_error_response(request: Request, exc: RequestValidationError) -> Response:
     auth_action = {"/auth/email/register": "register", "/auth/email/login": "login"}.get(request.url.path)
     if auth_action:
-        try:
-            body = json.loads(await request.body())
-            email = body.get("email", "") if isinstance(body, dict) else ""
-        except (ValueError, UnicodeDecodeError):
-            email = ""
+        # FastAPI already consumed the request stream during validation. With
+        # BaseHTTPMiddleware, rereading it here can wait forever on disconnect.
+        body = exc.body
+        email = body.get("email", "") if isinstance(body, dict) else ""
         log_auth_event(auth_action, str(email), outcome="failure", status=422, reason_code="invalid_request")
     return await request_validation_exception_handler(request, exc)
 
@@ -231,6 +230,50 @@ def _validate_game_projection(game: Game, history) -> None:
     expected_status = "finished" if terminal_status(final) else "active"
     if not _same_position_as_fen(final, game.current_fen) or final.red_to_move != game.red_to_move or game.status != expected_status:
         raise _api_error(409, "game_projection_mismatch", "当前局面与规则重放结果不一致，请修复或重新导入棋局")
+    _validate_game_events(game.initial_fen, game.events or [])
+
+
+def _validate_game_events(initial_fen: str, events: list[dict]) -> None:
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") not in {"undo", "hint"}:
+            raise _api_error(422, "invalid_game_event", "操作记录类型无效")
+        event_id = event.get("id")
+        created_at = event.get("createdAt")
+        try:
+            datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            raise _api_error(422, "invalid_game_event", "操作记录时间无效")
+        if not isinstance(event_id, str) or not event_id or len(event_id) > 100:
+            raise _api_error(422, "invalid_game_event", "操作记录编号无效")
+        moves = event.get("positionMoves")
+        position_fen = event.get("positionFen")
+        if not isinstance(moves, list) or len(moves) > 400 or not all(isinstance(move, str) for move in moves) or not isinstance(position_fen, str) or len(position_fen) > 220:
+            raise _api_error(422, "invalid_game_event", "操作记录局面格式无效")
+        history = validate_history(initial_fen, moves)
+        if history.issue or len(history.positions) != len(moves) + 1 or not _same_position_as_fen(history.positions[-1], position_fen):
+            raise _api_error(422, "invalid_game_event", "操作记录局面无法从起始局面重建")
+        if event.get("ply") != len(moves) + 1:
+            raise _api_error(422, "invalid_game_event", "操作记录回合号无效")
+        if event["type"] == "undo":
+            undone = event.get("undoneMoves")
+            if not isinstance(undone, list) or not undone or len(undone) > 400 or not all(isinstance(move, str) for move in undone):
+                raise _api_error(422, "invalid_game_event", "悔棋记录缺少撤回走法")
+            combined = validate_history(initial_fen, [*moves, *undone])
+            if combined.issue:
+                raise _api_error(422, "invalid_game_event", "悔棋记录中的撤回走法无效")
+        else:
+            candidates = event.get("candidates")
+            if not isinstance(candidates, list) or not candidates or len(candidates) > 5:
+                raise _api_error(422, "invalid_game_event", "提示记录缺少候选着法")
+            for candidate in candidates:
+                if not isinstance(candidate, dict) or not isinstance(candidate.get("move"), str) or not isinstance(candidate.get("label"), str) or len(candidate["label"]) > 100:
+                    raise _api_error(422, "invalid_game_event", "提示候选着法格式无效")
+                score = candidate.get("score")
+                if score is not None and (not isinstance(score, dict) or score.get("type") not in {"cp", "mate"} or not isinstance(score.get("value"), int)):
+                    raise _api_error(422, "invalid_game_event", "提示候选分值格式无效")
+                checked = validate_candidate(history.positions[-1], candidate["move"], history.positions, moves)
+                if checked.issue:
+                    raise _api_error(422, "invalid_game_event", "提示记录包含不合法着法")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -250,6 +293,7 @@ def _game_response(game: Game) -> GameResponse:
         updated_at=game.updated_at.isoformat(),
         engine_settings=_normalized_engine_settings(SavedEngineSettings.model_validate(game.engine_settings or {})),
         moves=[GameMoveResponse(ply=m.ply, side=m.side, uci=m.uci, notation_zh=m.notation_zh, before_fen=m.before_fen, after_fen=m.after_fen) for m in game.moves],
+        events=game.events or [],
     )
 
 
@@ -414,7 +458,8 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
         position = validate_fen(payload.initial_fen)
     except ValueError as exc:
         raise _api_error(400, "invalid_fen", str(exc)) from exc
-    game = Game(user_id=user.id, name=payload.name, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump())
+    _validate_game_events(payload.initial_fen.strip(), payload.events)
+    game = Game(user_id=user.id, name=payload.name, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(), events=payload.events)
     db.add(game)
     db.commit()
     db.refresh(game)
@@ -432,6 +477,7 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
     if history.issue:
         code = "rule_violation" if history.issue.code in {"perpetual_check", "perpetual_chase"} else "invalid_move_history"
         raise _api_error(422, code, f"第 {history.issue.ply} 步无效: {history.issue.message}")
+    _validate_game_events(payload.initial_fen.strip(), payload.events)
 
     existing = db.scalar(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.legacy_id == payload.legacy_id))
     if existing:
@@ -453,6 +499,7 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
         status="finished" if terminal_status(final) else "active",
         version=len(payload.moves),
         engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(),
+        events=payload.events,
     )
     db.add(game)
     db.flush()
@@ -486,6 +533,24 @@ async def update_game(game_id: str, payload: GameUpdateRequest, user: User = Dep
         raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
     game.name = payload.name
     game.version += 1
+    db.commit()
+    db.refresh(game)
+    return _game_response(game)
+
+
+@app.patch("/api/games/{game_id}/events", response_model=GameResponse)
+async def update_game_events(game_id: str, payload: GameEventsUpdateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+    game = _owned_game(db, user, game_id)
+    if game.version != payload.expected_version:
+        raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
+    _validate_game_events(game.initial_fen, payload.events)
+    known = {event["id"]: event for event in game.events or []}
+    for event in payload.events:
+        previous = known.get(event["id"])
+        if previous is not None and previous != event:
+            raise _api_error(409, "game_event_conflict", "操作记录编号已对应其他内容")
+        known[event["id"]] = event
+    game.events = sorted(known.values(), key=lambda event: event["createdAt"])
     db.commit()
     db.refresh(game)
     return _game_response(game)

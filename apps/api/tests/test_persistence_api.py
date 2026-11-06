@@ -50,6 +50,28 @@ def test_game_and_moves_are_persisted_and_owned_by_dev_user():
         assert fetched.json()["moves"][0]["uci"] == "a3a4"
 
 
+def test_game_events_are_saved_and_read_back_without_changing_move_version():
+    with TestClient(app) as client:
+        headers = {"X-Dev-User": "event-user"}
+        game = client.post("/api/games", headers=headers, json={"initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"}).json()
+        event = {"id": "event-1", "type": "undo", "createdAt": "2026-11-06T00:00:00Z", "ply": 1, "positionMoves": [], "positionFen": game["current_fen"], "undoneMoves": ["a3a4"]}
+        saved = client.patch(f"/api/games/{game['id']}/events", headers=headers, json={"expected_version": 0, "events": [event]})
+        assert saved.status_code == 200
+        assert saved.json()["events"] == [event]
+        assert saved.json()["version"] == 0
+        assert client.get(f"/api/games/{game['id']}", headers=headers).json()["events"] == [event]
+
+
+def test_game_events_reject_snapshots_that_do_not_match_validated_history():
+    with TestClient(app) as client:
+        headers = {"X-Dev-User": "invalid-event-user"}
+        game = client.post("/api/games", headers=headers, json={"initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"}).json()
+        event = {"id": "event-bad", "type": "hint", "createdAt": "2026-11-06T00:00:00Z", "ply": 1, "positionMoves": ["a3a4"], "positionFen": game["current_fen"], "candidates": [{"move": "a6a5", "label": "卒 1 进 1", "score": None}]}
+        response = client.patch(f"/api/games/{game['id']}/events", headers=headers, json={"expected_version": 0, "events": [event]})
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_game_event"
+
+
 def test_games_reviews_and_exports_are_isolated_between_users():
     with TestClient(app) as client:
         alice = {"X-Dev-User": "isolation-alice"}
