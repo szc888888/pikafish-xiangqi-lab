@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { useReviewSession } from './useReviewSession'
 import { START_FEN, toFen } from './xiangqi'
 import type { ReviewResponse } from './api'
+import { createHintEvent } from './gameEvents'
 
 const result: ReviewResponse = { items: [{ ply: 1, side: 'red', move: 'a3a4', label: '兵九进一', best_move: 'h2e2', best_label: '炮二平五', before_score: { type: 'cp', value: 0 }, after_score: { type: 'cp', value: -100 }, grade: 'mistake', loss_cp: 100, pv: ['h2e2'] }], final_score: null, analyzed_plies: 1 }
 const snapshot = () => ({ fen: START_FEN, moves: ['a3a4'], side: 'red' as const, gameId: 'one' })
@@ -59,5 +60,23 @@ describe('isolated review session', () => {
     expect(session.isStale(snapshot())).toBe(false)
     expect(session.isStale({ ...snapshot(), gameId: 'two' })).toBe(true)
     expect(session.isStale({ ...snapshot(), moves: [] })).toBe(true)
+  })
+  it('freezes event records with the review snapshot and detects new events as stale', async () => {
+    const event = createHintEvent([], START_FEN, [{ move: 'a3a4', label: '兵九进一', score: null }])
+    const live = { ...snapshot(), events: [event] }
+    const session = useReviewSession(async () => ({ ...result, items: [], analyzed_plies: 0 }))
+    await session.start(live)
+    live.events.push(createHintEvent([], START_FEN, [{ move: 'a3a4', label: '兵九进一', score: null }]))
+    expect(session.snapshot.value?.events).toHaveLength(1)
+    expect(session.isStale(live)).toBe(true)
+  })
+  it('restores a saved review without starting a new analysis', async () => {
+    let calls = 0
+    const session = useReviewSession(async () => { calls += 1; return result })
+    session.restore(snapshot(), result)
+    expect(calls).toBe(0)
+    expect(session.result.value).toEqual(result)
+    expect(session.snapshot.value?.moves).toEqual(['a3a4'])
+    expect(session.moments.value).toHaveLength(1)
   })
 })

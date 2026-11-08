@@ -1,3 +1,5 @@
+import { applyMove, describeUci, fromUci, parseFen, toFen, type Position } from './xiangqi'
+
 export interface HintEventCandidate {
   move: string
   label: string
@@ -25,6 +27,32 @@ export interface HintGameEvent {
 }
 
 export type GameEvent = UndoGameEvent | HintGameEvent
+
+export function eventPosition(initialFen: string, event: GameEvent): Position {
+  let replayed = parseFen(initialFen)
+  for (const move of event.positionMoves) replayed = applyMove(replayed, fromUci(move.slice(0, 2)), fromUci(move.slice(2)))
+  const snapshot = parseFen(event.positionFen)
+  if (toFen(replayed) !== toFen(snapshot)) throw new Error('事件局面与棋谱前缀不一致')
+  return replayed
+}
+
+export function eventHighlightMove(event: GameEvent): string | null {
+  return event.type === 'hint' ? event.candidates[0]?.move ?? null : event.undoneMoves.at(-1) ?? null
+}
+
+export function eventMoveLabels(initialFen: string, event: GameEvent): string[] {
+  if (event.type !== 'undo') return event.candidates.map(candidate => candidate.label)
+  let position = eventPosition(initialFen, event)
+  return event.undoneMoves.map(move => {
+    const label = describeUci(position, move)
+    try { position = applyMove(position, fromUci(move.slice(0, 2)), fromUci(move.slice(2))) } catch { return move }
+    return label
+  })
+}
+
+export function eventSide(initialFen: string, event: GameEvent): 'red' | 'black' {
+  return eventPosition(initialFen, event).redToMove ? 'red' : 'black'
+}
 
 export function createUndoEvent(moves: string[], count: number, positionFen: string, createdAt = new Date().toISOString()): UndoGameEvent {
   const steps = Math.max(0, Math.min(count, moves.length))

@@ -3,9 +3,13 @@ import { coachChat, review, type CoachMessage, type ReviewItem, type ReviewRespo
 import { applyMove, fromUci, parseFen } from './xiangqi'
 import { createRequestSequence } from './requestSequence'
 import { keyMoments, momentExplanation, type ReviewSide } from './reviewSummary'
+import type { GameEvent } from './gameEvents'
 
-export interface ReviewSnapshot { fen: string; moves: string[]; side: ReviewSide; gameId: string | null }
-export function reviewSnapshotKey(value: ReviewSnapshot): string { return JSON.stringify([value.gameId, value.fen, value.moves, value.side]) }
+export interface ReviewSnapshot { fen: string; moves: string[]; side: ReviewSide; gameId: string | null; events?: GameEvent[] }
+export function reviewSnapshotKey(value: ReviewSnapshot): string { return JSON.stringify([value.gameId, value.fen, value.moves, value.side, value.events ?? []]) }
+function cloneSnapshot(source: ReviewSnapshot): ReviewSnapshot {
+  return { ...source, moves: [...source.moves], events: source.events?.map(event => ({ ...event, positionMoves: [...event.positionMoves], ...(event.type === 'undo' ? { undoneMoves: [...event.undoneMoves] } : { candidates: event.candidates.map(candidate => ({ ...candidate, score: candidate.score ? { ...candidate.score } : null })) }) })) }
+}
 
 export function useReviewSession(
   analyze: (snapshot: ReviewSnapshot) => Promise<ReviewResponse> = snapshot => review({ fen: snapshot.fen, moves: snapshot.moves, depth: 8, movetime_ms: 350, threads: 1, hash_mb: 128 }),
@@ -28,17 +32,24 @@ export function useReviewSession(
     selected.value = item
     chats.invalidate(); messages.value = []; chatError.value = ''; chatBusy.value = false
   }
-  async function start(source: ReviewSnapshot) {
+  function restore(source: ReviewSnapshot, response: ReviewResponse) {
+    requests.invalidate()
+    snapshot.value = cloneSnapshot(source)
+    result.value = response; busy.value = false; error.value = ''
+    select(moments.value[0] ?? null)
+  }
+  async function start(source: ReviewSnapshot): Promise<ReviewResponse | null> {
     const request = requests.next()
-    snapshot.value = { ...source, moves: [...source.moves] }
+    snapshot.value = cloneSnapshot(source)
     result.value = null; busy.value = true; error.value = ''; select(null)
-    const captured = { ...source, moves: [...source.moves] }
+    const captured = snapshot.value!
     try {
       const response = await analyze(captured)
-      if (!requests.isCurrent(request)) return
+      if (!requests.isCurrent(request)) return null
       result.value = response
       select(moments.value[0] ?? null)
-    } catch (e) { if (requests.isCurrent(request)) error.value = e instanceof Error ? e.message : '复盘失败，请重试' }
+      return response
+    } catch (e) { if (requests.isCurrent(request)) error.value = e instanceof Error ? e.message : '复盘失败，请重试'; return null }
     finally { if (requests.isCurrent(request)) busy.value = false }
   }
   async function ask(question: string) {
@@ -57,6 +68,6 @@ export function useReviewSession(
     finally { if (chats.isCurrent(request)) chatBusy.value = false }
   }
   function invalidate() { requests.invalidate(); chats.invalidate(); busy.value = false; chatBusy.value = false }
-  return { snapshot, result, busy, error, selected, messages, chatBusy, chatError, moments, board, start, select, ask, invalidate,
+  return { snapshot, result, busy, error, selected, messages, chatBusy, chatError, moments, board, start, restore, select, ask, invalidate,
     isStale: (live: ReviewSnapshot) => snapshot.value !== null && reviewSnapshotKey(snapshot.value) !== reviewSnapshotKey(live) }
 }
