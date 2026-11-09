@@ -6,7 +6,9 @@ from app.xiangqi import (
     describe_uci,
     perpetual_check_side,
     perpetual_chase_side,
+    repetition_draw,
     resolve_move,
+    terminal_result,
     terminal_status,
     validate_fen,
     validate_history,
@@ -36,6 +38,23 @@ def test_terminal_status_reports_stalemate_separately(monkeypatch):
     monkeypatch.setattr(rules, "is_in_check", lambda _position, _red: False)
 
     assert terminal_status(Position.from_fen(START_FEN)) == "stalemate"
+
+
+def test_terminal_result_assigns_win_to_the_side_that_is_not_stalemated(monkeypatch):
+    import app.xiangqi as rules
+
+    monkeypatch.setattr(rules, "legal_moves", lambda _position, _source: [])
+    monkeypatch.setattr(rules, "is_in_check", lambda _position, _red: False)
+
+    assert terminal_result(Position.from_fen(START_FEN)) == ("stalemate", "black_win")
+
+
+def test_threefold_repetition_is_separate_from_perpetual_check():
+    quiet = Position.from_fen("4k4/9/9/9/R3p4/9/9/9/9/4K4 w - - 0 1")
+    repeated = [quiet, quiet, quiet]
+
+    assert repetition_draw(repeated) is True
+    assert perpetual_check_side(repeated) is None
 
 
 def test_pawn_move_is_valid():

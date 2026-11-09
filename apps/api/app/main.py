@@ -20,19 +20,21 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .logging_config import REQUEST_ID_HEADER, configure_logging, get_logger, request_id_context
 
-from .engine import EngineRuleViolation, EngineUnavailable, PikafishEngine
+from .engine import EngineQueueFull, EngineQueueTimeout, EngineRuleViolation, EngineUnavailable, PikafishEngine
 from .engine_strength import profile_for, select_candidate
+from .ai_friends import AiFriend, get_friend, load_catalog, random_friend, recommend_friend, snapshot as friend_snapshot
 from .llm import LLMUnavailable, VisionRecognitionError, coach_chat, explain, recognize_board_image
-from .models import CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
+from .models import AiFriendSummary, AiFriendsResponse, MatchRequest, MatchResponse, RandomMatchRequest, HallGameCreateRequest, TurnRequest, ResignRequest, HallTurnResponse, GameResultResponse, GameStatsResponse, CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
 from .auth import get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
 from .database import assert_database_migrated, get_db, init_database
-from .persistence import DataRequest, DeletionTombstone, Game, GameMove, LocalCredential, PrivacyConsent, Review, ReviewItem, User, UserIdentity
+from .persistence import DataRequest, DeletionTombstone, Game, GameMove, GameTurn, LocalCredential, PrivacyConsent, Review, ReviewItem, User, UserIdentity
 from .deletion_ledger import export_artifact_path, purge_expired_deletions, purge_expired_exports
 from .openings import lookup_openings
 from .review import review_game
-from .xiangqi import Position, describe_uci, resolve_move_position, terminal_status, validate_candidate, validate_fen, validate_history, validate_moves
+from .game_hall import HallTurnError, submit_turn
+from .xiangqi import Position, START_FEN, describe_uci, history_result, resolve_move_position, terminal_result, terminal_status, validate_candidate, validate_fen, validate_history, validate_moves
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
 from . import oidc
@@ -227,8 +229,10 @@ def _validate_game_projection(game: Game, history) -> None:
         ):
             raise _api_error(409, "game_projection_mismatch", "棋谱快照与规则重放结果不一致，请修复或重新导入棋局")
     final = history.positions[-1]
-    expected_status = "finished" if terminal_status(final) else "active"
-    if not _same_position_as_fen(final, game.current_fen) or final.red_to_move != game.red_to_move or game.status != expected_status:
+    rule_result = history_result(history.positions, [move.uci for move in game.moves])
+    expected_status = "finished" if rule_result else "active"
+    awaiting_ai = game.status == "awaiting_ai" and expected_status == "active" and any(turn.status == "ai_pending" for turn in game.turns)
+    if not _same_position_as_fen(final, game.current_fen) or final.red_to_move != game.red_to_move or (game.status != expected_status and not awaiting_ai):
         raise _api_error(409, "game_projection_mismatch", "当前局面与规则重放结果不一致，请修复或重新导入棋局")
     _validate_game_events(game.initial_fen, game.events or [])
 
@@ -281,6 +285,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _game_response(game: Game) -> GameResponse:
+    pending_turn = next((turn for turn in game.turns if turn.status == "ai_pending"), None)
     return GameResponse(
         id=game.id,
         name=game.name,
@@ -294,6 +299,36 @@ def _game_response(game: Game) -> GameResponse:
         engine_settings=_normalized_engine_settings(SavedEngineSettings.model_validate(game.engine_settings or {})),
         moves=[GameMoveResponse(ply=m.ply, side=m.side, uci=m.uci, notation_zh=m.notation_zh, before_fen=m.before_fen, after_fen=m.after_fen) for m in game.moves],
         events=game.events or [],
+        mode=game.mode or "legacy",
+        user_side=game.user_side,
+        opponent_id=game.opponent_id,
+        opponent_config_version=game.opponent_config_version,
+        opponent_snapshot=game.opponent_snapshot,
+        result=game.result,
+        termination_reason=game.termination_reason,
+        finished_at=_iso(game.finished_at),
+        origin=game.origin or "legacy",
+        counts_for_stats=bool(game.counts_for_stats),
+        pending_turn_id=pending_turn.turn_id if pending_turn else None,
+        pending_turn_expected_version=pending_turn.expected_version if pending_turn else None,
+        pending_turn_user_uci=pending_turn.user_uci if pending_turn else None,
+    )
+
+
+def _friend_summary(friend: AiFriend) -> AiFriendSummary:
+    return AiFriendSummary(
+        bot_id=friend.bot_id,
+        name=friend.name,
+        avatar_key=friend.avatar_key,
+        description=friend.description,
+        category=friend.category,
+        style=list(friend.style),
+        personality=list(friend.personality),
+        strength_profile=friend.strength_profile,
+        config_version=friend.config_version,
+        experiences=list(friend.experiences),
+        enabled=friend.enabled,
+        is_ai=True,
     )
 
 
@@ -442,6 +477,36 @@ async def logout(request: Request) -> dict:
     return {"ok": True}
 
 
+@app.get("/api/ai-friends", response_model=AiFriendsResponse)
+async def ai_friends(experience: str | None = None) -> AiFriendsResponse:
+    if experience is not None and experience not in {"casual", "practice", "challenge"}:
+        raise _api_error(400, "invalid_experience", "未知的推荐体验")
+    catalog = load_catalog()
+    friends = [friend for friend in catalog.friends if friend.enabled and (experience is None or experience in friend.experiences)]
+    return AiFriendsResponse(
+        catalog_version=catalog.catalog_version,
+        friends=[_friend_summary(friend) for friend in friends],
+        recommended_ids=[friend.bot_id for friend in friends if "practice" in friend.experiences],
+    )
+
+
+@app.post("/api/matches/recommend", response_model=MatchResponse, status_code=201)
+async def recommend_match(payload: MatchRequest) -> MatchResponse:
+    try:
+        friend = recommend_friend(payload.experience)
+    except ValueError as exc:
+        raise _api_error(400, "invalid_experience", str(exc)) from exc
+    catalog = load_catalog()
+    return MatchResponse(match_type="recommend", experience=payload.experience, opponent=_friend_summary(friend), catalog_version=catalog.catalog_version)
+
+
+@app.post("/api/matches/random", response_model=MatchResponse, status_code=201)
+async def random_match(payload: RandomMatchRequest) -> MatchResponse:
+    friend = random_friend(set(payload.exclude_opponent_ids))
+    catalog = load_catalog()
+    return MatchResponse(match_type="random", opponent=_friend_summary(friend), catalog_version=catalog.catalog_version)
+
+
 @app.get("/api/games", response_model=list[GameResponse])
 async def list_games(user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> list[GameResponse]:
     games = db.scalars(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.deleted_at.is_(None)).order_by(Game.updated_at.desc())).all()
@@ -466,6 +531,40 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
     return _game_response(game)
 
 
+@app.post("/api/hall/games", response_model=GameResponse, status_code=201)
+async def create_hall_game(payload: HallGameCreateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+    if user.status != "active":
+        raise _api_error(410, "account_unavailable", "账号正在删除或已删除")
+    try:
+        friend = get_friend(payload.opponent_id)
+    except KeyError as exc:
+        raise _api_error(404, "ai_friend_not_found", "AI 棋友不存在或已停用") from exc
+    position = Position.from_fen(START_FEN)
+    game = Game(
+        user_id=user.id,
+        name=payload.name or friend.name,
+        initial_fen=START_FEN,
+        current_fen=START_FEN,
+        red_to_move=True,
+        status="active",
+        mode="ai_hall",
+        user_side=payload.user_side,
+        opponent_id=friend.bot_id,
+        opponent_config_version=friend.config_version,
+        opponent_snapshot=friend_snapshot(friend),
+        origin="cloud_formal",
+        counts_for_stats=False,
+        engine_settings=_normalized_engine_settings(SavedEngineSettings(difficulty=friend.strength_profile)).model_dump(),
+        events=[],
+    )
+    if terminal_result(position):
+        raise _api_error(409, "invalid_start_position", "标准起始局面不能是终局")
+    db.add(game)
+    db.commit()
+    db.refresh(game)
+    return _game_response(game)
+
+
 @app.post("/api/games/import", response_model=GameResponse, status_code=201)
 async def import_legacy_game(payload: LegacyGameImportRequest, response: Response, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     if user.status != "active":
@@ -478,6 +577,16 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
         code = "rule_violation" if history.issue.code in {"perpetual_check", "perpetual_chase"} else "invalid_move_history"
         raise _api_error(422, code, f"第 {history.issue.ply} 步无效: {history.issue.message}")
     _validate_game_events(payload.initial_fen.strip(), payload.events)
+    opponent_snapshot = None
+    if payload.mode == "ai_hall":
+        if not payload.user_side or not payload.opponent_id or not payload.opponent_snapshot:
+            raise _api_error(400, "invalid_guest_game", "导入 AI 棋友局需要执棋方和机器人快照")
+        try:
+            opponent_snapshot = AiFriendSummary.model_validate(payload.opponent_snapshot)
+        except Exception as exc:
+            raise _api_error(400, "invalid_guest_game", "机器人快照格式无效") from exc
+        if opponent_snapshot.bot_id != payload.opponent_id or opponent_snapshot.is_ai is not True:
+            raise _api_error(400, "invalid_guest_game", "机器人身份与快照不一致")
 
     existing = db.scalar(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.legacy_id == payload.legacy_id))
     if existing:
@@ -489,6 +598,7 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
         return _game_response(existing)
 
     final = history.positions[-1]
+    terminal = history_result(history.positions, payload.moves) if payload.mode == "ai_hall" else None
     game = Game(
         user_id=user.id,
         legacy_id=payload.legacy_id,
@@ -496,10 +606,20 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
         initial_fen=payload.initial_fen.strip(),
         current_fen=_position_to_fen(final),
         red_to_move=final.red_to_move,
-        status="finished" if terminal_status(final) else "active",
+        status="finished" if (terminal or terminal_status(final)) else "active",
         version=len(payload.moves),
         engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(),
         events=payload.events,
+        mode=payload.mode,
+        user_side=payload.user_side,
+        opponent_id=payload.opponent_id,
+        opponent_config_version=opponent_snapshot.config_version if opponent_snapshot else None,
+        opponent_snapshot=opponent_snapshot.model_dump() if opponent_snapshot else None,
+        result=terminal[1] if terminal else None,
+        termination_reason=terminal[0] if terminal else None,
+        finished_at=datetime.now(timezone.utc) if terminal else None,
+        origin="guest_import",
+        counts_for_stats=False,
     )
     db.add(game)
     db.flush()
@@ -575,15 +695,21 @@ async def append_move(game_id: str, payload: MoveCreateRequest, user: User = Dep
     before_fen = _position_to_fen(before)
     after_fen = _position_to_fen(after)
     move = GameMove(game_id=game.id, ply=len(game.moves) + 1, side="red" if before.red_to_move else "black", uci=payload.uci, notation_zh=describe_uci(before, payload.uci), before_fen=before_fen, after_fen=after_fen)
+    terminal = history_result(history.positions, [*moves, payload.uci])
     values = {
         "current_fen": after_fen,
         "red_to_move": after.red_to_move,
-        "status": "finished" if terminal_status(after) else "active",
+        "status": "finished" if terminal else "active",
         "version": payload.expected_version + 1,
         "updated_at": datetime.now(timezone.utc),
     }
     if payload.engine_settings is not None:
         values["engine_settings"] = _normalized_engine_settings(payload.engine_settings).model_dump()
+    if terminal and game.mode == "ai_hall":
+        values["result"] = terminal[1]
+        values["termination_reason"] = terminal[0]
+        values["finished_at"] = datetime.now(timezone.utc)
+        values["counts_for_stats"] = game.origin == "cloud_formal"
     changed = db.execute(
         update(Game)
         .where(Game.id == game.id, Game.user_id == user.id, Game.version == payload.expected_version, Game.deleted_at.is_(None))
@@ -597,6 +723,75 @@ async def append_move(game_id: str, payload: MoveCreateRequest, user: User = Dep
     db.commit()
     db.expire_all()
     return _game_response(_owned_game(db, user, game.id))
+
+
+@app.post("/api/games/{game_id}/turns", response_model=HallTurnResponse)
+async def hall_turn(game_id: str, payload: TurnRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> HallTurnResponse:
+    game = _owned_game(db, user, game_id)
+    try:
+        result = await submit_turn(db, user, game, payload, engine)
+    except HallTurnError as exc:
+        raise _api_error(exc.status, exc.code, str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="AI 回合处理失败，请重试同一回合编号") from exc
+    return HallTurnResponse(
+        turn_id=result.turn.turn_id,
+        turn_status=result.turn.status,
+        game=_game_response(result.game),
+        user_move=GameMoveResponse(ply=result.user_move.ply, side=result.user_move.side, uci=result.user_move.uci, notation_zh=result.user_move.notation_zh, before_fen=result.user_move.before_fen, after_fen=result.user_move.after_fen) if result.user_move else None,
+        ai_move=GameMoveResponse(ply=result.ai_move.ply, side=result.ai_move.side, uci=result.ai_move.uci, notation_zh=result.ai_move.notation_zh, before_fen=result.ai_move.before_fen, after_fen=result.ai_move.after_fen) if result.ai_move else None,
+    )
+
+
+@app.post("/api/games/{game_id}/resign", response_model=GameResponse)
+async def resign_game(game_id: str, payload: ResignRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+    game = _owned_game(db, user, game_id)
+    request_turn_id = f"resign:{payload.request_id}"
+    fingerprint = hashlib.sha256(f"resign:{game_id}:{payload.expected_version}".encode()).hexdigest()
+    previous = db.scalar(select(GameTurn).where(GameTurn.game_id == game.id, GameTurn.turn_id == request_turn_id))
+    if previous is not None:
+        if previous.request_fingerprint != fingerprint:
+            raise _api_error(409, "turn_conflict", "认输请求编号已对应其他棋局版本")
+        return _game_response(game)
+    if game.mode != "ai_hall" or game.status != "active":
+        raise _api_error(409, "game_not_resignable", "当前棋局不能认输")
+    if game.version != payload.expected_version:
+        raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
+    winner = "black_win" if game.user_side == "red" else "red_win"
+    game.status = "finished"
+    game.result = winner
+    game.termination_reason = "resignation"
+    game.finished_at = datetime.now(timezone.utc)
+    game.counts_for_stats = game.origin == "cloud_formal"
+    game.version += 1
+    db.add(GameTurn(turn_id=request_turn_id, game_id=game.id, request_fingerprint=fingerprint, expected_version=payload.expected_version, status="completed"))
+    db.commit()
+    db.refresh(game)
+    return _game_response(game)
+
+
+@app.get("/api/games/{game_id}/result", response_model=GameResultResponse)
+async def game_result(game_id: str, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResultResponse:
+    game = _owned_game(db, user, game_id)
+    if game.status != "finished" or game.result is None or game.termination_reason is None or game.finished_at is None:
+        raise _api_error(409, "game_not_finished", "棋局尚未产生正式结果")
+    opponent = AiFriendSummary.model_validate(game.opponent_snapshot) if game.opponent_snapshot else None
+    return GameResultResponse(game_id=game.id, result=game.result, termination_reason=game.termination_reason, opponent=opponent, finished_at=game.finished_at.isoformat(), counts_for_stats=bool(game.counts_for_stats))
+
+
+@app.get("/api/me/game-stats", response_model=GameStatsResponse)
+async def game_stats(opponent_id: str | None = None, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameStatsResponse:
+    query = select(Game).where(Game.user_id == user.id, Game.mode == "ai_hall", Game.status == "finished", Game.counts_for_stats.is_(True), Game.deleted_at.is_(None))
+    if opponent_id:
+        query = query.where(Game.opponent_id == opponent_id)
+    games = db.scalars(query).all()
+    red_wins = sum(game.result == "red_win" for game in games)
+    black_wins = sum(game.result == "black_win" for game in games)
+    draws = sum(game.result == "draw" for game in games)
+    wins = sum(game.result == ("red_win" if game.user_side == "red" else "black_win") for game in games)
+    losses = sum(game.result == ("black_win" if game.user_side == "red" else "red_win") for game in games)
+    return GameStatsResponse(total=red_wins + black_wins + draws, red_wins=red_wins, black_wins=black_wins, draws=draws, wins=wins, losses=losses)
 
 
 @app.delete("/api/games/{game_id}", status_code=204)
@@ -616,7 +811,7 @@ async def request_export(user: User = Depends(get_current_user), db: Session = D
     export_root = Path(os.getenv("EXPORT_ROOT", str(Path(__file__).resolve().parents[3] / "exports")))
     export_root.mkdir(parents=True, exist_ok=True)
     archive_path = export_root / f"{request.id}.zip"
-    games = db.scalars(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id)).all()
+    games = db.scalars(select(Game).options(selectinload(Game.moves), selectinload(Game.turns)).where(Game.user_id == user.id)).all()
     reviews = db.scalars(select(Review).options(selectinload(Review.items)).where(Review.user_id == user.id)).all()
     credential = db.scalar(select(LocalCredential).where(LocalCredential.user_id == user.id))
     identities = db.scalars(select(UserIdentity).where(UserIdentity.user_id == user.id)).all()
@@ -652,6 +847,7 @@ async def request_export(user: User = Depends(get_current_user), db: Session = D
         archive.writestr("privacy_consents.json", json.dumps([{"policy_type": consent.policy_type, "policy_version": consent.policy_version, "accepted_at": _iso(consent.accepted_at), "withdrawn_at": _iso(consent.withdrawn_at)} for consent in consents], ensure_ascii=False))
         archive.writestr("data_requests.json", json.dumps([{"id": item.id, "type": item.type, "status": item.status, "requested_at": _iso(item.requested_at), "completed_at": _iso(item.completed_at), "expires_at": _iso(item.expires_at), "error_code": item.error_code} for item in requests], ensure_ascii=False))
         archive.writestr("games.json", json.dumps([_game_response(game).model_dump() for game in games], ensure_ascii=False, default=str))
+        archive.writestr("game_turns.json", json.dumps([{"id": turn.id, "game_id": turn.game_id, "turn_id": turn.turn_id, "request_fingerprint": turn.request_fingerprint, "expected_version": turn.expected_version, "user_uci": turn.user_uci, "user_ply": turn.user_ply, "ai_uci": turn.ai_uci, "ai_ply": turn.ai_ply, "status": turn.status, "error_code": turn.error_code, "attempt_count": turn.attempt_count, "created_at": _iso(turn.created_at), "updated_at": _iso(turn.updated_at)} for game in games for turn in game.turns], ensure_ascii=False))
         archive.writestr("reviews.json", json.dumps(review_rows, ensure_ascii=False))
     request.status = "ready"
     request.artifact_key = str(archive_path)
@@ -750,6 +946,10 @@ async def analyze(request: EngineRequest) -> EngineResponse:
         raise
     except EngineRuleViolation as exc:
         raise _api_error(422, exc.code, str(exc)) from exc
+    except EngineQueueFull as exc:
+        raise _api_error(429, exc.code, str(exc)) from exc
+    except EngineQueueTimeout as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise _api_error(400, _value_error_code(str(exc), "invalid_fen"), str(exc)) from exc
     except EngineUnavailable as exc:
@@ -794,6 +994,10 @@ async def engine_move(request: EngineMoveRequest) -> EngineMoveResponse:
         raise
     except EngineRuleViolation as exc:
         raise _api_error(422, exc.code, str(exc)) from exc
+    except EngineQueueFull as exc:
+        raise _api_error(429, exc.code, str(exc)) from exc
+    except EngineQueueTimeout as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise _api_error(400, _value_error_code(str(exc), "invalid_parameter"), str(exc)) from exc
     except EngineUnavailable as exc:
@@ -843,6 +1047,8 @@ async def plan_analysis(request: PlanAnalysisRequest) -> PlanAnalysisResponse:
         raise
     except EngineRuleViolation as exc:
         raise _api_error(422, exc.code, str(exc)) from exc
+    except EngineQueueTimeout as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise _api_error(400, _value_error_code(str(exc), "invalid_fen"), str(exc)) from exc
     except Exception as exc:
@@ -869,6 +1075,8 @@ async def review(request: ReviewRequest) -> ReviewResponse:
     except ValueError as exc:
         code = _value_error_code(str(exc), "invalid_move_history")
         raise _api_error(400, code, str(exc)) from exc
+    except EngineQueueTimeout as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
     except EngineUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -886,6 +1094,8 @@ async def persist_review(game_id: str, request: ReviewRequest, user: User = Depe
         result = await review_game(engine, request.fen, request.moves, request.depth, request.movetime_ms, request.threads, request.hash_mb)
     except ValueError as exc:
         raise _api_error(400, _value_error_code(str(exc), "invalid_move_history"), str(exc)) from exc
+    except EngineQueueTimeout as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
     except EngineUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     canonical = json.dumps({"fen": request.fen.strip(), "moves": request.moves}, ensure_ascii=False, separators=(",", ":"))

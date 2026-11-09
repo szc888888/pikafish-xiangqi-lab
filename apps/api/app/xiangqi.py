@@ -222,6 +222,17 @@ def _repetition_key(position: Position) -> str:
     return "/".join("".join(row) for row in position.board) + (" w" if position.red_to_move else " b")
 
 
+def repetition_draw(positions: list[Position]) -> bool:
+    """Return whether a complete board plus side-to-move has appeared three times."""
+    counts: dict[str, int] = {}
+    for position in positions:
+        key = _repetition_key(position)
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] >= 3:
+            return True
+    return False
+
+
 def _material_key(position: Position) -> str:
     return "".join(sorted(piece for row in position.board for piece in row if piece != "."))
 
@@ -400,6 +411,28 @@ def terminal_status(position: Position) -> str | None:
             if piece != "." and piece.isupper() == position.red_to_move and legal_moves(position, (row, col)):
                 return None
     return "checkmate" if is_in_check(position, position.red_to_move) else "stalemate"
+
+
+def terminal_result(position: Position) -> tuple[str, str] | None:
+    """Return the terminal kind and winner from the current Xiangqi rules."""
+    status = terminal_status(position)
+    if status is None:
+        return None
+    loser = "red" if position.red_to_move else "black"
+    winner = "black_win" if loser == "red" else "red_win"
+    return status, winner
+
+
+def history_result(positions: list[Position], moves: list[str] | None = None) -> tuple[str, str] | None:
+    """Return a rule draw for ordinary repetition, otherwise a terminal win."""
+    if not positions:
+        return None
+    terminal = terminal_result(positions[-1])
+    if terminal:
+        return terminal
+    if repetition_draw(positions):
+        return "rule_draw", "draw"
+    return None
 
 
 def validate_moves(fen: str, moves: list[str]) -> tuple[bool, str | None, int | None]:

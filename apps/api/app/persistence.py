@@ -89,6 +89,16 @@ class Game(Base):
     current_fen: Mapped[str] = mapped_column(String(220))
     engine_settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     events: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    mode: Mapped[str] = mapped_column(String(24), default="legacy", server_default="legacy")
+    user_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    opponent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    opponent_config_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    opponent_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    termination_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    origin: Mapped[str] = mapped_column(String(24), default="legacy", server_default="legacy")
+    counts_for_stats: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     red_to_move: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     version: Mapped[int] = mapped_column(Integer, default=0)
@@ -97,6 +107,27 @@ class Game(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     moves: Mapped[list["GameMove"]] = relationship(order_by="GameMove.ply", cascade="all, delete-orphan")
+    turns: Mapped[list["GameTurn"]] = relationship(order_by="GameTurn.created_at", cascade="all, delete-orphan")
+
+
+class GameTurn(Base):
+    __tablename__ = "game_turns"
+    __table_args__ = (UniqueConstraint("game_id", "turn_id", name="uq_game_turn_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    turn_id: Mapped[str] = mapped_column(String(128))
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    expected_version: Mapped[int] = mapped_column(Integer)
+    user_uci: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    user_ply: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_uci: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    ai_ply: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="ai_pending", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class GameMove(Base):

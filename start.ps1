@@ -19,7 +19,7 @@ if (-not $npm) {
     $npm = Get-Command npm -ErrorAction Stop
 }
 
-$apiCommand = "$apiPython -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+$apiCommand = "$apiPython -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1"
 $webCommand = "$($npm.Source) run dev"
 
 Write-Output "API directory: $apiDir"
@@ -178,7 +178,7 @@ if ($apiHealthy) {
 } else {
     Write-LauncherEvent "API start: output will append to $apiLog"
     try {
-        Start-LoggedProcess 'API' $apiPython @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000') $apiDir $apiLog
+        Start-LoggedProcess 'API' $apiPython @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000', '--workers', '1') $apiDir $apiLog
     } catch {
         Show-StartupFailure 'API' $apiLog
         throw

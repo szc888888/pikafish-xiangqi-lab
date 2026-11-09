@@ -42,6 +42,14 @@ class EngineUnavailable(RuntimeError):
     pass
 
 
+class EngineQueueFull(EngineUnavailable):
+    code = "engine_queue_full"
+
+
+class EngineQueueTimeout(EngineUnavailable):
+    code = "engine_queue_timeout"
+
+
 class EngineRuleViolation(EngineUnavailable):
     def __init__(self, message: str, summary: CandidateFilterSummary):
         super().__init__(message)
@@ -61,6 +69,11 @@ class PikafishEngine:
         self.timeout_seconds = float(os.getenv("PIKAFISH_TIMEOUT_SECONDS", "30"))
         self.process: asyncio.subprocess.Process | None = None
         self.lock = asyncio.Lock()
+        self.lifecycle_lock = asyncio.Lock()
+        self.max_inflight = min(3, max(1, int(os.getenv("ENGINE_MAX_INFLIGHT", "3"))))
+        self.queue_wait_timeout_seconds = min(5.0, max(0.05, float(os.getenv("ENGINE_QUEUE_WAIT_TIMEOUT_SECONDS", "5"))))
+        self._inflight = 0
+        self._inflight_lock = asyncio.Lock()
         self.last_error: str | None = None
         self.engine_version: str | None = None
         self.nnue_version: str | None = None
@@ -74,6 +87,10 @@ class PikafishEngine:
         return self.process is not None and self.process.returncode is None
 
     async def start(self) -> None:
+        async with self.lifecycle_lock:
+            await self._start_process()
+
+    async def _start_process(self) -> None:
         if self.ready:
             return
         logger.info("engine.starting", extra=_log_fields(
@@ -127,9 +144,14 @@ class PikafishEngine:
                 pid=getattr(process, "pid", "-"), outcome="failed",
                 **_exception_fields(exc),
             ))
-            await self.stop()
+            await self._stop_process()
 
     async def stop(self) -> None:
+        async with self.lock:
+            async with self.lifecycle_lock:
+                await self._stop_process()
+
+    async def _stop_process(self) -> None:
         process, self.process = self.process, None
         if process is None:
             return
@@ -151,11 +173,23 @@ class PikafishEngine:
         ))
 
     async def reset(self) -> None:
-        await self.stop()
-        await self.start()
+        async with self.lock:
+            async with self.lifecycle_lock:
+                await self._stop_process()
+                await self._start_process()
         logger.info("engine.reset", extra=_log_fields(
             event="engine.reset", outcome="success" if self.ready else "failed"
         ))
+
+    async def _reserve(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight >= self.max_inflight:
+                raise EngineQueueFull(f"Pikafish 当前已有 {self.max_inflight} 个请求在途，请稍后重试")
+            self._inflight += 1
+
+    async def _release(self) -> None:
+        async with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
 
     async def _send(self, command: str) -> None:
         if not self.process or not self.process.stdin:
@@ -219,41 +253,62 @@ class PikafishEngine:
         terminal = terminal_status(position)
         if terminal:
             return EngineResponse(bestmove="0000", terminal_status=terminal)
-        async with self.lock:
-            await self.start()
-            if not self.ready:
-                raise EngineUnavailable(self.last_error or "Pikafish 未配置")
-            effective_depth = _bounded(depth or self.default_depth, 1, 64)
-            bounded_movetime = _bounded(movetime_ms, 0, 120000)
-            bounded_multipv = _bounded(multipv, 1, 32)
-            bounded_threads = _bounded(threads, 1, 128)
-            bounded_hash = _bounded(hash_mb, 1, 8192)
-            pid = getattr(self.process, "pid", "-")
-            started_at = time.monotonic()
-            params = dict(
-                depth=effective_depth, movetime_ms=bounded_movetime,
-                multipv=bounded_multipv, threads=bounded_threads, hash_mb=bounded_hash,
-            )
-            logger.info("engine.search.started", extra=_log_fields(
-                event="engine.search.started", pid=pid, outcome="started", **params
-            ))
+        await self._reserve()
+        acquired = False
+        try:
             try:
-                result = await self._search(
-                    fen, moves, effective_depth, bounded_movetime, bounded_multipv,
-                    bounded_threads, bounded_hash,
-                    search_params=params, pid=pid, started_at=started_at,
+                await asyncio.wait_for(self.lock.acquire(), timeout=self.queue_wait_timeout_seconds)
+                acquired = True
+            except TimeoutError as exc:
+                raise EngineQueueTimeout("Pikafish 请求排队超过等待时限，请稍后重试") from exc
+            try:
+                await self.start()
+                if not self.ready:
+                    raise EngineUnavailable(self.last_error or "Pikafish 未配置")
+                effective_depth = _bounded(depth or self.default_depth, 1, 64)
+                bounded_movetime = _bounded(movetime_ms, 0, 120000)
+                bounded_multipv = _bounded(multipv, 1, 32)
+                bounded_threads = _bounded(threads, 1, 128)
+                bounded_hash = _bounded(hash_mb, 1, 8192)
+                pid = getattr(self.process, "pid", "-")
+                started_at = time.monotonic()
+                params = dict(
+                    depth=effective_depth, movetime_ms=bounded_movetime,
+                    multipv=bounded_multipv, threads=bounded_threads, hash_mb=bounded_hash,
                 )
-                return result
-            except Exception as exc:
-                cause = exc.__cause__ if isinstance(exc.__cause__, TimeoutError) else exc
-                outcome = "timeout" if isinstance(cause, TimeoutError) else "failed"
-                logger.error("engine.search.failed", extra=_log_fields(
-                    event="engine.search.failed",
-                    pid=pid, outcome=outcome,
-                    duration_ms=round((time.monotonic() - started_at) * 1000),
-                    **params, **_exception_fields(cause),
+                logger.info("engine.search.started", extra=_log_fields(
+                    event="engine.search.started", pid=pid, outcome="started", **params
                 ))
-                raise
+                try:
+                    result = await self._search(
+                        fen, moves, effective_depth, bounded_movetime, bounded_multipv,
+                        bounded_threads, bounded_hash,
+                        search_params=params, pid=pid, started_at=started_at,
+                    )
+                    return result
+                except asyncio.CancelledError:
+                    try:
+                        await self._send("stop")
+                        await asyncio.wait_for(self._wait_for("bestmove"), 2)
+                    except Exception:
+                        async with self.lifecycle_lock:
+                            await self._stop_process()
+                    raise
+                except Exception as exc:
+                    cause = exc.__cause__ if isinstance(exc.__cause__, TimeoutError) else exc
+                    outcome = "timeout" if isinstance(cause, TimeoutError) else "failed"
+                    logger.error("engine.search.failed", extra=_log_fields(
+                        event="engine.search.failed",
+                        pid=pid, outcome=outcome,
+                        duration_ms=round((time.monotonic() - started_at) * 1000),
+                        **params, **_exception_fields(cause),
+                    ))
+                    raise
+            finally:
+                if acquired:
+                    self.lock.release()
+        finally:
+            await self._release()
 
     async def _search(
         self, fen: str, moves: list[str], depth: int | None, movetime_ms: int,
@@ -358,7 +413,8 @@ class PikafishEngine:
                     await self._send("stop")
                     await asyncio.wait_for(self._wait_for("bestmove"), 2)
                 except Exception:
-                    await self.stop()
+                    async with self.lifecycle_lock:
+                        await self._stop_process()
                 raise EngineUnavailable("Pikafish 搜索超时，已停止本次分析") from exc
 
     @staticmethod

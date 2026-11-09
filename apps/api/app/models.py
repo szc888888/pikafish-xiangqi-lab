@@ -198,6 +198,85 @@ class SetupImageResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AiFriendSummary(BaseModel):
+    bot_id: str
+    name: str
+    avatar_key: str
+    description: str
+    category: Literal["casual", "practice", "challenge"]
+    style: list[str] = Field(default_factory=list)
+    personality: list[str] = Field(default_factory=list)
+    strength_profile: Literal["companion", "beginner", "progress", "serious", "full"]
+    config_version: str
+    experiences: list[Literal["casual", "practice", "challenge"]] = Field(default_factory=list)
+    enabled: bool = True
+    is_ai: Literal[True] = True
+
+
+class AiFriendsResponse(BaseModel):
+    catalog_version: str
+    friends: list[AiFriendSummary] = Field(default_factory=list)
+    recommended_ids: list[str] = Field(default_factory=list)
+
+
+class MatchRequest(BaseModel):
+    experience: Literal["casual", "practice", "challenge"]
+
+
+class RandomMatchRequest(BaseModel):
+    exclude_opponent_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class MatchResponse(BaseModel):
+    match_type: Literal["recommend", "random"]
+    experience: str | None = None
+    opponent: AiFriendSummary
+    catalog_version: str
+
+
+class HallGameCreateRequest(BaseModel):
+    opponent_id: str = Field(min_length=1, max_length=64)
+    user_side: Literal["red", "black"] = "red"
+    name: str | None = Field(default=None, max_length=120)
+
+
+class TurnRequest(BaseModel):
+    turn_id: str = Field(min_length=8, max_length=128)
+    expected_version: int = Field(ge=0)
+    user_uci: str | None = Field(default=None, min_length=4, max_length=8)
+
+
+class ResignRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=128)
+    expected_version: int = Field(ge=0)
+
+
+class HallTurnResponse(BaseModel):
+    turn_id: str
+    turn_status: Literal["ai_pending", "completed"]
+    game: "GameResponse"
+    user_move: "GameMoveResponse | None" = None
+    ai_move: "GameMoveResponse | None" = None
+
+
+class GameResultResponse(BaseModel):
+    game_id: str
+    result: Literal["red_win", "black_win", "draw"]
+    termination_reason: Literal["checkmate", "stalemate", "rule_draw", "resignation"]
+    opponent: AiFriendSummary | None = None
+    finished_at: str
+    counts_for_stats: bool
+
+
+class GameStatsResponse(BaseModel):
+    total: int = 0
+    red_wins: int = 0
+    black_wins: int = 0
+    draws: int = 0
+    wins: int = 0
+    losses: int = 0
+
+
 class SavedEngineSettings(BaseModel):
     difficulty: Literal["companion", "beginner", "progress", "serious", "full", "custom"] = "progress"
     allow_suboptimal: bool = True
@@ -221,6 +300,10 @@ class LegacyGameImportRequest(BaseModel):
     moves: list[str] = Field(default_factory=list, max_length=400)
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
     events: list[dict] = Field(default_factory=list, max_length=1000)
+    mode: Literal["legacy", "ai_hall"] = "legacy"
+    user_side: Literal["red", "black"] | None = None
+    opponent_id: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_snapshot: dict | None = None
 
 
 class MoveCreateRequest(BaseModel):
@@ -261,6 +344,19 @@ class GameResponse(BaseModel):
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
     moves: list[GameMoveResponse] = Field(default_factory=list)
     events: list[dict] = Field(default_factory=list)
+    mode: Literal["legacy", "ai_hall"] = "legacy"
+    user_side: Literal["red", "black"] | None = None
+    opponent_id: str | None = None
+    opponent_config_version: str | None = None
+    opponent_snapshot: dict | None = None
+    result: Literal["red_win", "black_win", "draw"] | None = None
+    termination_reason: Literal["checkmate", "stalemate", "rule_draw", "resignation"] | None = None
+    finished_at: str | None = None
+    origin: Literal["cloud_formal", "guest_local", "guest_import", "legacy"] = "legacy"
+    counts_for_stats: bool = False
+    pending_turn_id: str | None = None
+    pending_turn_expected_version: int | None = None
+    pending_turn_user_uci: str | None = None
 
 
 class DataRequestResponse(BaseModel):
@@ -269,6 +365,11 @@ class DataRequestResponse(BaseModel):
     status: str
     expires_at: str | None = None
     download_url: str | None = None
+
+
+HallTurnResponse.model_rebuild()
+
+
 
 
 class EmailRegisterRequest(BaseModel):

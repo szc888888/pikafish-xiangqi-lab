@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, deleteGame, engineMove, forgotPassword, getAuthMethods, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, importGame, loginEmail, logout, persistReview, recognizeSetupImage, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, updateGameEvents, verifyEmail, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PersistedGameEvent, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
+import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, createHallGame, deleteGame, engineMove, forgotPassword, getAiFriends, getAuthMethods, getGame, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, importGame, loginEmail, logout, persistReview, randomMatch, recognizeSetupImage, recommendMatch, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, resignHallGame, submitHallTurn, updateGameEvents, verifyEmail, type AiFriend, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PersistedGameEvent, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
 import { migrateLegacyGames } from './lib/legacyGameMigration'
 import { applyMove, clonePosition, describeUci, fromUci, legalTargets, movePiece, parseFen, perpetualCheckSide, perpetualChaseSide, setPiece, START_FEN, toFen, toUci, validateSetupPosition, type Piece, type Position } from './lib/xiangqi'
 import { listRecognizedPieces } from './lib/recognitionPositions'
@@ -12,6 +12,7 @@ import CoachView from './components/CoachView.vue'
 import GamesView, { type SavedGameView } from './components/GamesView.vue'
 import EngineSettings from './components/EngineSettings.vue'
 import SetupControls from './components/SetupControls.vue'
+import AiFriendView, { type HallRecentGame } from './components/AiFriendView.vue'
 import { createRequestSequence } from './lib/requestSequence'
 import { collectHintCandidates } from './lib/hintCandidates'
 import { normalizeSavedEngineSettings, opponentPresets } from './lib/engineStrength'
@@ -27,9 +28,9 @@ import { useReviewSession, reviewSnapshotKey, type ReviewSnapshot } from './lib/
 import { reviewDisabledReason } from './lib/reviewSummary'
 import { terminalStatus } from './lib/xiangqi'
 
-type Tab = 'duel'|'analysis'|'review'|'coach'|'games'
-const tabs: { id: Tab; label: string }[] = [{ id:'duel',label:'对弈' },{ id:'analysis',label:'分析' },{ id:'review',label:'复盘' },{ id:'coach',label:'教练' },{ id:'games',label:'棋局' }]
-const tab = ref<Tab>('duel')
+type Tab = 'hall'|'duel'|'analysis'|'review'|'coach'|'games'
+const tabs: { id: Tab; label: string }[] = [{ id:'hall',label:'棋友大厅' },{ id:'duel',label:'对弈' },{ id:'analysis',label:'分析' },{ id:'review',label:'复盘' },{ id:'coach',label:'教练' },{ id:'games',label:'棋局' }]
+const tab = ref<Tab>('hall')
 const boardTheme = ref<BoardTheme>('classic')
 const health = ref<Health|null>(null)
 const healthError = ref('')
@@ -60,6 +61,19 @@ const planAnalysis = ref<PlanAnalysis|null>(null)
 const planBusy = ref(false)
 const hint = ref<{move:string|null;label:string|null}>({move:null,label:null})
 const hintCandidates = ref<Analysis['lines']>([])
+const hallFriends = ref<AiFriend[]>([])
+const hallLoading = ref(false)
+const hallBusy = ref(false)
+const hallError = ref('')
+const hallOpponent = ref<AiFriend | null>(null)
+const hallMode = ref(false)
+const hallCloud = ref(false)
+const hallTurnId = ref<string | null>(null)
+const hallTurnMove = ref<string | null>(null)
+const hallExpectedVersion = ref(0)
+const hallResult = ref<string | null>(null)
+const hallCatalogVersion = ref('')
+const hallRecentGames = computed<HallRecentGame[]>(()=>savedGames.value.filter(game=>game.mode==='ai_hall').slice(0,4).map(game=>({id:game.id,name:game.name??'',startedAt:game.startedAt,updatedAt:game.updatedAt,moveCount:game.moves.length,opponentName:game.opponentSnapshot?.name,result:game.result,status:game.status??'active'})))
 const reviewResult = ref<ReviewResponse|null>(null)
 const reviewBusy = ref(false), reviewError = ref(''), selectedPly = ref<number|null>(null)
 const openings = ref<OpeningLine[]>([])
@@ -122,6 +136,7 @@ const BOARD_THEME_STORAGE_KEY = 'pikafish-lab-board-theme-v1'
 interface SavedGame extends SavedGameView {
   baseFen:string; depth:number; movetime:number; multipv:number; difficulty:Difficulty
   difficultySettings:PersistedEngineSettings & {hintLimit:number|null}
+  mode?: 'legacy'|'ai_hall'; opponentId?: string; opponentSnapshot?: AiFriend; userSide?: 'red'|'black'; origin?: 'guest_local'|'cloud_formal'|'guest_import'|'legacy'; result?: string|null; terminationReason?: string|null; status?: string; pendingTurnId?: string|null; pendingUserUci?: string|null; pendingExpectedVersion?: number|null
   hintSettings?:{difficulty?:HintDifficulty;depth:number;movetime_ms:number;multipv:number;showCandidates?:boolean}; hintsUsed:number; reviewCache?:{snapshotKey:string;result:ReviewResponse;generatedAt:string}; serverVersion?:number; syncedMoves?:number; syncedEvents?:number
 }
 const savedGames = ref<SavedGame[]>([])
@@ -188,7 +203,7 @@ const undoSteps = computed(()=>{
 const canUndo = computed(()=>!setupMode.value&&undoSteps.value>0&&status.value!=='thinking'&&!replayBusy.value)
 const redoSteps = computed(()=>futureMoves.value.length?Math.min(redoBatchSize.value ?? futureMoves.value.length, futureMoves.value.length):0)
 const canRedo = computed(()=>!setupMode.value&&redoSteps.value>0&&status.value!=='thinking'&&!studyMode.value&&!replayBusy.value)
-const canHumanMove = computed(()=>setupMode.value?recognitionUi.value.canEdit:(!replayBusy.value&&!gameTerminal.value&&!studyMode.value&&side.value!=='watch'&&(!engineReady.value||side.value===(position.value.redToMove?'red':'black'))))
+const canHumanMove = computed(()=>setupMode.value?recognitionUi.value.canEdit:(!replayBusy.value&&(!hallMode.value||!hallBusy.value)&&!gameTerminal.value&&!studyMode.value&&side.value!=='watch'&&(!engineReady.value||side.value===(position.value.redToMove?'red':'black'))))
 const canRequestHint = computed(()=>engineReady.value&&!replayBusy.value&&!setupMode.value&&!studyMode.value&&side.value!=='watch'&&status.value!=='thinking')
 const displayPosition = computed(()=>{
   if(setupMode.value&&setupDraft.value)return setupDraft.value
@@ -268,14 +283,16 @@ function readSavedGames(){
 }
 function serverGameRecord(game:PersistedGame):SavedGame{
   const settings=normalizeSavedEngineSettings(game.engine_settings)
-  return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),events:game.events??[],side:'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length,syncedEvents:game.events?.length??0}
+return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),events:game.events??[],side:game.user_side??'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length,syncedEvents:game.events?.length??0,mode:game.mode,opponentId:game.opponent_id??undefined,opponentSnapshot:game.opponent_snapshot??undefined,userSide:game.user_side??undefined,origin:game.origin,status:game.status,result:game.result,terminationReason:game.termination_reason,pendingTurnId:game.pending_turn_id??null,pendingUserUci:game.pending_turn_user_uci??null,pendingExpectedVersion:game.pending_turn_expected_version??null}
 }
 function gameEngineSettings(game:SavedGame):PersistedEngineSettings{return{difficulty:game.difficulty,allow_suboptimal:game.difficultySettings.allow_suboptimal,depth:game.difficultySettings.depth,movetime_ms:game.difficultySettings.movetime_ms,threads:game.difficultySettings.threads,hash_mb:game.difficultySettings.hash_mb}}
 interface GameMigrationResult { migrated:number; failed:number }
 async function migrateLocalGames():Promise<GameMigrationResult>{
-  const imported=await migrateLegacyGames(savedGames.value,async(game)=>{
+  const importable=savedGames.value.filter(game=>!(game.mode==='ai_hall'&&game.status==='finished'))
+  const imported=await migrateLegacyGames(importable,async(game)=>{
     const localId=game.id
-    const remote=await importGame({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events})
+    const remote=await importGame({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events,mode:game.mode??'legacy',user_side:game.userSide,opponent_id:game.opponentId,opponent_snapshot:game.opponentSnapshot})
+    await getGame(remote.id)
     game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length;game.syncedEvents=remote.events.length
     if(currentGameId.value===localId)currentGameId.value=remote.id
     persistGames()
@@ -298,11 +315,13 @@ async function loadServerGames():Promise<GameMigrationResult>{
       const local=localGames.find(game=>game.id===remoteGame.id)
       if(!local)return remoteGame
       const events=[...remoteGame.events,...local.events.filter(event=>!remoteGame.events.some(saved=>saved.id===event.id))]
-      return{...remoteGame,...local,events,serverVersion:remoteGame.serverVersion,syncedMoves:Math.min(local.syncedMoves??remoteGame.syncedMoves??0,remoteGame.moves.length),syncedEvents:remoteGame.events.length}
+      return{...local,...remoteGame,events,serverVersion:remoteGame.serverVersion,syncedMoves:Math.min(local.syncedMoves??remoteGame.syncedMoves??0,remoteGame.moves.length),syncedEvents:remoteGame.events.length}
     })
     const guestGames=localGames.filter(game=>game.serverVersion===undefined&&!remoteIds.has(game.id))
     savedGames.value=[...merged,...guestGames].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));persistGames()
-    return await migrateLocalGames()
+    const migration=await migrateLocalGames()
+    restoreMostRecentHall()
+    return migration
   }catch{message.value='云端棋局加载失败，请稍后重试';return empty}
 }
 async function loadAuthState(){
@@ -369,16 +388,24 @@ function rebuildPositionHistory(fen:string,moves:string[]){const positions=[pars
 function perpetualRuleForMove(move:string,moves=history.value){try{const positions=rebuildPositionHistory(baseFen.value,moves);const current=positions[positions.length-1];positions.push(applyMove(current,fromUci(move.slice(0,2)),fromUci(move.slice(2))));const check=perpetualCheckSide(positions,[...moves,move]);if(check)return {side:check,kind:'长将'} as const;const chase=perpetualChaseSide(positions,[...moves,move]);return chase?{side:chase,kind:'长捉'} as const:null}catch{return null}}
 function perpetualCheckForMove(move:string,moves=history.value){return perpetualRuleForMove(move,moves)?.side??null}
 function perpetualCheckMessage(rule:{side:'red'|'black';kind:'长将'|'长捉'}|null){return rule?`${rule.side==='red'?'红方':'黑方'}连续${rule.kind}，违反棋规，不能执行该着法`:''}
+function localHallTerminal():{status:'checkmate'|'stalemate'|'rule_draw';result:'red_win'|'black_win'|'draw'}|null{
+  const terminal=terminalStatus(position.value)
+  if(terminal)return{status:terminal,result:position.value.redToMove?'black_win':'red_win'}
+  const positions=rebuildPositionHistory(baseFen.value,history.value),seen=new Map<string,number>()
+  for(const item of positions){const key=`${item.board.map(row=>row.join('')).join('/')} ${item.redToMove?'w':'b'}`;seen.set(key,(seen.get(key)??0)+1);if((seen.get(key)??0)>=3)return{status:'rule_draw',result:'draw'}}
+  return null
+}
 function useSavedGame(view:SavedGameView,replay=false){
   const game=savedGames.value.find(item=>item.id===view.id);if(!game)return
+  if(replay&&game.mode==='ai_hall'&&game.opponentSnapshot){void beginHallGame(game.opponentSnapshot,game.userSide??(game.side==='black'?'black':'red'));return}
   try{
-    position.value=rebuildPosition(game.baseFen,replay?[]:game.moves);baseFen.value=game.baseFen;history.value=replay?[]:[...game.moves];gameEvents.value=replay?[]:[...(game.events??[])] as GameEvent[];futureMoves.value=[];redoBatchSize.value=null;currentGameId.value=replay?null:game.id
+    position.value=rebuildPosition(game.baseFen,replay?[]:game.moves);baseFen.value=game.baseFen;history.value=replay?[]:[...game.moves];gameEvents.value=replay?[]:[...(game.events??[])] as GameEvent[];futureMoves.value=[];redoBatchSize.value=null;currentGameId.value=replay?null:game.id;hallMode.value=game.mode==='ai_hall';hallCloud.value=game.mode==='ai_hall' && game.serverVersion!==undefined;hallOpponent.value=game.opponentSnapshot??null;hallResult.value=game.result??null;hallExpectedVersion.value=replay?0:game.pendingExpectedVersion??game.serverVersion??0;hallTurnId.value=replay?null:game.pendingTurnId??null;hallTurnMove.value=replay?null:game.pendingUserUci??null
     side.value=game.side;difficulty.value=game.difficulty;allowSuboptimal.value=game.difficultySettings.allow_suboptimal;depth.value=game.difficultySettings.depth;movetime.value=game.difficultySettings.movetime_ms;threads.value=game.difficultySettings.threads;hashMb.value=game.difficultySettings.hash_mb;analysisMultiPv.value=game.multipv??3;hintDifficulty.value=game.hintSettings?.difficulty??'regular';hintDepth.value=game.hintSettings?.depth??depth.value;hintMovetime.value=game.hintSettings?.movetime_ms??movetime.value;hintMultiPv.value=game.hintSettings?.multipv??3;showHintCandidates.value=game.hintSettings?.showCandidates??true;hintUsed.value=replay?0:game.hintsUsed
     fenInput.value=toFen(position.value);selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];clearStudy();clearReview();message.value=replay?'已从棋局起始局面重新开始':'棋局已载入，可以继续';tab.value='duel';if(!replay)void startQuickReview()
   }catch{message.value='棋局记录损坏，无法载入'}
 }
 function removeGame(view:SavedGameView){const game=savedGames.value.find(item=>item.id===view.id);savedGames.value=savedGames.value.filter(g=>g.id!==view.id);if(currentGameId.value===view.id)currentGameId.value=null;persistGames();if(game?.serverVersion!==undefined)void deleteGame(view.id).catch(()=>{})}
-function resetGame(){saveCurrentGame();currentGameId.value=null;gameEvents.value=[];baseFen.value=START_FEN;position.value=parseFen(START_FEN);fenInput.value=START_FEN;history.value=[];futureMoves.value=[];redoBatchSize.value=null;selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];hint.value={move:null,label:null};hintCandidates.value=[];coachContext.value='';clearStudy();clearReview();planAnalysis.value=null;message.value='新局已开始';}
+function resetGame(){if(hallMode.value&&hallOpponent.value){void beginHallGame(hallOpponent.value,side.value==='black'?'black':'red');return}saveCurrentGame();currentGameId.value=null;hallMode.value=false;hallCloud.value=false;hallOpponent.value=null;hallResult.value=null;hallTurnId.value=null;hallTurnMove.value=null;hallExpectedVersion.value=0;gameEvents.value=[];baseFen.value=START_FEN;position.value=parseFen(START_FEN);fenInput.value=START_FEN;history.value=[];futureMoves.value=[];redoBatchSize.value=null;selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];hint.value={move:null,label:null};hintCandidates.value=[];coachContext.value='';clearStudy();clearReview();planAnalysis.value=null;message.value='新局已开始';}
 function loadFen(){try{saveCurrentGame();position.value=parseFen(fenInput.value);baseFen.value=toFen(position.value);fenInput.value=baseFen.value;history.value=[];gameEvents.value=[];futureMoves.value=[];redoBatchSize.value=null;currentGameId.value=null;selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];coachContext.value='';clearStudy();clearReview();message.value='局面已加载'}catch(error){message.value=error instanceof Error?error.message:'FEN 无效'}}
 async function undo(){
   if(!canUndo.value)return
@@ -419,6 +446,7 @@ function clickSquare(row:number,col:number){
     const move=`${toUci(...selected.value)}${toUci(row,col)}`
     const offender=perpetualRuleForMove(move)
     if(offender){selected.value=null;message.value=perpetualCheckMessage(offender);return}
+    if(hallMode.value){selected.value=null;void playHallMove(move);return}
     position.value=applyMove(position.value,selected.value,[row,col]);history.value.push(move);futureMoves.value=[];redoBatchSize.value=null;selected.value=null;analysis.value=null;hint.value={move:null,label:null};hintCandidates.value=[];coachContext.value='';clearReview();clearStudy();ensureGame();saveCurrentGame();message.value=`${move} 已落子`
     const engineTurn=side.value!=='watch'&&side.value!==(position.value.redToMove?'red':'black')
     if(engineTurn&&engineReady.value)void askEngine(true);else if(engineTurn)message.value+='；当前为手动模式'
@@ -472,6 +500,63 @@ async function refreshHealth(){try{health.value=await getHealth();healthError.va
 async function restartEngine(){health.value=await resetEngine();message.value=health.value.engine_ready?'引擎已重启':health.value.error??'引擎未配置'}
 function exportMoves(){void navigator.clipboard?.writeText(history.value.join(' '));message.value='走法已复制'}
 function setTab(next:Tab){tab.value=next;if(next==='analysis')void refreshOpenings();if(next==='games'&&history.value.length)void startQuickReview()}
+async function loadHall(){hallLoading.value=true;try{const response=await getAiFriends();hallFriends.value=response.friends;hallCatalogVersion.value=response.catalog_version;hallError.value=''}catch(error){hallError.value=error instanceof Error?error.message:'棋友目录加载失败'}finally{hallLoading.value=false}}
+function hallLocalRecord(friend:AiFriend,userSide:'red'|'black'){
+  const now=new Date().toISOString(),id=`hall-${globalThis.crypto?.randomUUID?.()??Math.random().toString(36).slice(2)}`
+  const profile=friend.strength_profile
+  const record:SavedGame={...createGameRecord(id,now,now,friend.name),mode:'ai_hall',opponentId:friend.bot_id,opponentSnapshot:friend,userSide,origin:'guest_local',status:'active',result:null,terminationReason:null,side:userSide}
+  record.difficulty=profile;record.difficultySettings={...currentEngineSettings(),difficulty:profile,hintLimit:null};savedGames.value.unshift(record);persistGames();return record
+}
+async function beginHallGame(friend:AiFriend,userSide:'red'|'black'){
+  hallBusy.value=true;hallError.value='';hallResult.value=null;hallOpponent.value=friend;hallMode.value=true;hallCloud.value=Boolean(currentUser.value?.status==='active'&&currentUser.value.privacy_accepted!==false)
+  position.value=parseFen(START_FEN);baseFen.value=START_FEN;fenInput.value=START_FEN;history.value=[];gameEvents.value=[];futureMoves.value=[];selected.value=null;side.value=userSide;difficulty.value=friend.strength_profile;applyDifficulty(friend.strength_profile);hallTurnId.value=null;hallTurnMove.value=null;hallExpectedVersion.value=0;tab.value='duel';message.value=`与 ${friend.name} 的对局已开始`
+  try{
+    if(hallCloud.value){const game=await createHallGame({opponent_id:friend.bot_id,user_side:userSide});currentGameId.value=game.id;hallExpectedVersion.value=game.version;const record=serverGameRecord(game);savedGames.value.unshift(record);persistGames()}
+    else{const record=hallLocalRecord(friend,userSide);currentGameId.value=record.id}
+    hallBusy.value=false
+    if(userSide==='black')await playHallMove(null)
+  }catch(error){hallError.value=error instanceof Error?error.message:'创建对局失败';message.value=hallError.value}finally{hallBusy.value=false}
+}
+async function matchHall(kind:'recommend'|'random',experience:'casual'|'practice'|'challenge'='practice'){
+  hallBusy.value=true;hallError.value='';try{const match=kind==='recommend'?await recommendMatch(experience):await randomMatch();hallBusy.value=false;await beginHallGame(match.opponent,'red')}catch(error){hallError.value=error instanceof Error?error.message:'匹配失败';hallBusy.value=false}
+}
+async function playHallMove(userUci:string|null){
+  const record=savedGames.value.find(item=>item.id===currentGameId.value);if(!record||!hallOpponent.value||hallBusy.value)return
+  hallBusy.value=true;status.value='thinking';hallError.value='';hallTurnId.value??=`turn-${globalThis.crypto?.randomUUID?.()??Date.now().toString(36)}`;hallTurnMove.value=userUci
+  try{
+    if(hallCloud.value){
+      record.pendingTurnId=hallTurnId.value;record.pendingUserUci=userUci;record.pendingExpectedVersion??=hallExpectedVersion.value;record.status='awaiting_ai';record.updatedAt=new Date().toISOString();persistGames()
+      const response=await submitHallTurn(record.id,{turn_id:hallTurnId.value,expected_version:record.pendingExpectedVersion,user_uci:userUci})
+      const remote=response.game;hallExpectedVersion.value=remote.version;record.moves=remote.moves.map(move=>move.uci);record.status=remote.status;record.result=remote.result;record.terminationReason=remote.termination_reason;record.updatedAt=remote.updated_at;record.serverVersion=remote.version;record.syncedMoves=record.moves.length;if(remote.status==='finished')hallResult.value=remote.result??null
+      position.value=rebuildPosition(record.baseFen,record.moves);history.value=[...record.moves];record.pendingTurnId=remote.pending_turn_id??null;record.pendingUserUci=null;record.pendingExpectedVersion=remote.pending_turn_expected_version??null;persistGames();fenInput.value=toFen(position.value);message.value=remote.status==='finished'?'对局结束':`${hallOpponent.value.name} 已应手`
+    }else{
+      const retryingPending=record.pendingTurnId===hallTurnId.value
+      if(userUci&&!retryingPending){position.value=applyMove(position.value,fromUci(userUci.slice(0,2)),fromUci(userUci.slice(2)));history.value.push(userUci)}
+      const terminal=localHallTerminal()
+      if(terminal){record.status='finished';record.result=terminal.result;record.terminationReason=terminal.status;hallResult.value=record.result}
+      else if(position.value.redToMove!==(side.value==='red')){
+        record.moves=[...history.value];record.status='awaiting_ai';record.pendingTurnId=hallTurnId.value;record.pendingUserUci=userUci;record.updatedAt=new Date().toISOString();persistGames()
+        const result=await engineMove({fen:baseFen.value,moves:[...history.value],difficulty:hallOpponent.value.strength_profile,allow_suboptimal:true,game_id:record.id,ply:history.value.length,depth:depth.value,movetime_ms:movetime.value,multipv:1,threads:1,hash_mb:hashMb.value})
+        const candidate=result.bestmove;const next=applyMove(position.value,fromUci(candidate.slice(0,2)),fromUci(candidate.slice(2)));position.value=next;history.value.push(candidate)
+        const ended=localHallTerminal();if(ended){record.status='finished';record.result=ended.result;record.terminationReason=ended.status;hallResult.value=record.result}
+      }
+      record.moves=[...history.value];record.updatedAt=new Date().toISOString();record.status??='active';record.result=record.result??null;record.side=side.value;record.pendingTurnId=null;record.pendingUserUci=null;record.pendingExpectedVersion=null;persistGames();fenInput.value=toFen(position.value);message.value=record.status==='finished'?'对局结束':`${hallOpponent.value.name} 已应手`
+    }
+    hallTurnId.value=null;hallTurnMove.value=null
+  }catch(error){hallError.value=error instanceof Error?error.message:'AI 应手失败';message.value=`${hallError.value}。可重试当前回合`;status.value='error'}finally{hallBusy.value=false;if(status.value==='thinking')status.value='idle'}
+}
+async function resignHall(){const record=savedGames.value.find(item=>item.id===currentGameId.value);if(!record||hallBusy.value)return;hallBusy.value=true;try{if(hallCloud.value){const game=await resignHallGame(record.id,{request_id:`resign-${globalThis.crypto?.randomUUID?.()??Date.now()}`,expected_version:hallExpectedVersion.value});record.status=game.status;record.result=game.result;record.terminationReason=game.termination_reason;record.serverVersion=game.version;hallExpectedVersion.value=game.version}else{record.status='finished';record.result=side.value==='red'?'black_win':'red_win';record.terminationReason='resignation';record.updatedAt=new Date().toISOString();persistGames()}hallResult.value=record.result??null;message.value='已认输，对局结束'}catch(error){hallError.value=error instanceof Error?error.message:'认输失败'}finally{hallBusy.value=false}}
+function restoreMostRecentHall(){
+  if(hallMode.value||currentGameId.value)return
+  const saved=savedGames.value.find(game=>game.mode==='ai_hall'&&(game.status==='active'||game.status==='awaiting_ai'))
+  if(!saved)return
+  hallOpponent.value=saved.opponentSnapshot??null
+  if(!hallOpponent.value)return
+  useSavedGame(saved)
+  tab.value='duel'
+  if(saved.status==='awaiting_ai'&&saved.pendingTurnId)void playHallMove(saved.pendingUserUci??null)
+  else if(hallCloud.value&&position.value.redToMove!==(side.value==='red')){hallTurnId.value=`turn-${globalThis.crypto?.randomUUID?.()??Date.now().toString(36)}`;hallExpectedVersion.value=saved.serverVersion??0;void playHallMove(null)}
+}
 watch(side,value=>{if(value==='black'&&position.value.redToMove&&!history.value.length&&engineReady.value)void askEngine(true)})
 watch(history,()=>{void refreshOpenings()})
 watch([gameTerminal,()=>reviewSnapshotKey(currentReviewSnapshot.value),engineReady,()=>status.value],()=>{
@@ -486,7 +571,7 @@ watch([gameTerminal,()=>reviewSnapshotKey(currentReviewSnapshot.value),engineRea
 })
 watch([difficulty,allowSuboptimal,depth,movetime,threads,hashMb,hintDifficulty,hintDepth,hintMovetime,hintMultiPv,showHintCandidates],()=>saveEngineSettings())
 watch(boardTheme,value=>{try{localStorage.setItem(BOARD_THEME_STORAGE_KEY,value)}catch{}})
-onMounted(()=>{readEngineSettings();readBoardTheme();readSavedGames();void loadAuthState().then(loadServerGames);void processEmailAction();void refreshHealth();void refreshOpenings();healthRefreshTimer=window.setInterval(()=>void refreshHealth(),15_000)})
+onMounted(()=>{readEngineSettings();readBoardTheme();readSavedGames();void loadHall();void loadAuthState().then(loadServerGames).finally(restoreMostRecentHall);void processEmailAction();void refreshHealth();void refreshOpenings();healthRefreshTimer=window.setInterval(()=>void refreshHealth(),15_000)})
 onUnmounted(()=>{if(healthRefreshTimer!==undefined)window.clearInterval(healthRefreshTimer);quickReview.invalidate()})
 </script>
 
@@ -498,8 +583,10 @@ onUnmounted(()=>{if(healthRefreshTimer!==undefined)window.clearInterval(healthRe
     <section class="workspace">
       <div class="board-column"><div class="board-panel"><label class="board-theme-picker">棋盘风格<select v-model="boardTheme"><option value="classic">经典</option><option value="high-contrast">黑白高对比</option><option value="wood">立体木纹</option></select></label><BoardView :position="displayPosition" :interactive="canHumanMove" :theme="boardTheme" :setup-selected-square="setupSelectedSquare" :last-move="displayedLastMove" :highlight-move="highlightMove" @square="clickSquare"/><div class="turn-line"><span>当前轮次：<b>{{ displayPosition.redToMove?'红方':'黑方' }}</b></span><span>{{ studyMode?'浏览模式':message }}</span></div><button v-if="studyMode" class="return-live" @click="clearStudy">返回当前对局</button></div><div class="move-strip"><strong>本局棋谱</strong><span>{{ history.length?history.map((move,index)=>`${Math.ceil((index+1)/2)}${index%2===0?'.':''} ${move}`).join('　'):'尚未落子' }}</span><button @click="exportMoves">复制</button></div></div>
       <section class="work-panel"><nav class="tabs" aria-label="功能分类"><button v-for="item in tabs" :key="item.id" :class="{active:tab===item.id}" @click="setTab(item.id)">{{ item.label }}<span v-if="item.id==='games'" class="tab-count">{{ savedGames.length }}</span></button></nav>
+        <AiFriendView v-show="tab==='hall'" :friends="hallFriends" :recent-games="hallRecentGames" :loading="hallLoading" :busy="hallBusy" :error="hallError" @recommend="matchHall('recommend',$event)" @random="matchHall('random')" @challenge="(botId, userSide) => { const friend = hallFriends.find(item => item.bot_id === botId); if (friend) void beginHallGame(friend, userSide) }" @open-games="tab='games'"/>
         <article v-if="(tab==='duel'||tab==='review'||tab==='games') && quickReview.snapshot.value" class="card quick-review-banner"><div><strong>{{ quickReview.busy.value ? '正在生成本局小结…' : quickReview.error.value ? '本局小结暂未完成' : `本局小结 · ${quickReview.moments.value.length} 个关键时刻` }}</strong><p class="help">{{ quickReviewStale ? '上次复盘后棋局已变化，可按当前进度重新分析。' : quickReview.error.value || '只看值得回看的一步，不给自己增加负担。' }}</p></div><div class="quick-review-actions"><button :disabled="!!quickReviewReason" @click="openReview()">{{ quickReviewStale ? '复盘当前进度' : '查看小结' }}</button><button v-if="quickReview.result.value" class="secondary" :disabled="!!quickReviewReason || quickReview.busy.value" @click="openReview(true)">重新生成</button></div></article>
         <section v-show="tab==='duel'" class="view-stack"><article class="card"><div class="card-title"><div><h2>人机对弈</h2><p class="help">选择适合自己的对手；提示、分析和复盘使用完整棋力。</p></div><span class="pill">{{ status==='thinking'?'THINKING':status==='error'?'ERROR':'READY' }}</span></div><div class="controls"><label>执棋方<select v-model="side"><option value="red">执红</option><option value="black">执黑</option><option value="watch">观战</option></select></label><label>对手水平<select :value="difficulty" @change="applyDifficulty(($event.target as HTMLSelectElement).value as Difficulty)"><option value="companion">轻松陪练</option><option value="beginner">入门练习</option><option value="progress">进阶对手</option><option value="serious">认真对弈</option><option value="full">全力挑战</option><option v-if="difficulty==='custom'" value="custom" disabled>自定义（高级设置中）</option></select></label></div><p class="help">{{ presets[difficulty].label }}：{{ presets[difficulty].description }}。{{ side==='watch'?'观战模式当前不自动运行双方引擎。':'' }}</p><EngineSettings :difficulty="difficulty" :allow-suboptimal="allowSuboptimal" :hint-difficulty="hintDifficulty" :depth="depth" :movetime="movetime" :threads="threads" :hash-mb="hashMb" :max-threads="maxThreads" :hint-depth="hintDepth" :hint-movetime="hintMovetime" :hint-multi-pv="hintMultiPv" :show-hint-candidates="showHintCandidates" @save="saveEngineSettings(true)" @update:difficulty="applyDifficulty($event)" @update:allow-suboptimal="allowSuboptimal=$event" @update:hint-difficulty="applyHintDifficulty($event)" @update:depth="depth=$event" @update:movetime="movetime=$event" @update:threads="threads=$event" @update:hash-mb="hashMb=$event" @update:hint-depth="hintDepth=$event" @update:hint-movetime="hintMovetime=$event" @update:hint-multipv="hintMultiPv=$event" @update:show-hint-candidates="setShowHintCandidates($event)"/><div class="button-row"><button class="hint-button" :disabled="!canRequestHint" @click="requestHint">提示一步</button><button :disabled="!!quickReviewReason" :title="quickReviewReason || '复盘当前已完成的棋谱'" @click="openReview()">复盘</button><button :disabled="setupMode||status==='thinking'" @click="openSaveGameDialog">保存为新棋局</button><button @click="resetGame">新局</button><button :disabled="!canUndo" @click="undo">悔棋</button><button :disabled="!canRedo" title="恢复已撤回的走法" @click="redo">前进</button><button @click="exportMoves">复制走法</button></div><p v-if="quickReviewReason" class="help">复盘：{{ quickReviewReason }}</p><p v-if="hint.move" class="hint-result">建议：<strong>{{ hint.label }}</strong>（{{ hint.move }}）</p><div v-if="hintCandidates.length" class="hint-candidates"><div class="hint-candidates-title">候选着法 <span>{{ hintCandidates.length }}/{{ hintMultiPv }}</span></div><div v-for="(candidate,index) in hintCandidates" :key="`${candidate.rank}-${candidate.move}`" class="hint-candidate" :class="{ best: index===0 }"><strong>{{ index + 1 }}. {{ index===0?'最佳 · ':'' }}{{ candidate.label }}</strong><span>{{ hintScore(candidate.score) }}</span></div></div></article><article class="card"><div class="card-title"><h2>棋局状态</h2></div><p class="help">{{ message }}</p><p class="help">已走 {{ history.length }} 个半回合 · {{ engineReady?'Pikafish 已连接':'未配置引擎，当前可手动走子' }}</p></article></section>
+        <section v-show="tab==='duel' && hallMode" class="card hall-game-status"><div class="card-title"><div><h2>AI 棋友对局 · {{ hallOpponent?.name }}</h2><p class="help">{{ hallCloud ? '已登录云端保存' : '游客本地临时棋局，不计入正式战绩' }}</p></div><button class="secondary compact" :disabled="hallBusy || hallResult !== null" @click="resignHall">认输</button></div><p v-if="hallError" class="hall-error">{{ hallError }} <button v-if="hallTurnId" class="secondary compact" :disabled="hallBusy" @click="playHallMove(hallTurnMove)">重试当前回合</button></p><p v-if="hallResult" class="hall-result">对局结束：{{ hallResult === 'draw' ? '和棋' : hallResult === (side === 'red' ? 'red_win' : 'black_win') ? '你获胜' : 'AI 棋友获胜' }}</p></section>
         <AnalysisView v-show="tab==='analysis'" :analysis="analysis" :position="displayPosition" :busy="status==='thinking'" :multipv="analysisMultiPv" :fen="fenInput" :openings="openings" :selected-line="selectedLine" @analyze="analyzeCurrentView" @update:multipv="analysisMultiPv=$event" @update:fen="fenInput=$event" @load-fen="loadFen" @select-line="selectCandidate" @coach="coachContext=$event;tab='coach'"/>
         <section v-show="tab==='analysis'" class="card plan-analysis"><div class="card-title"><div><h2>比较我的思路</h2><p class="help">输入计划和具体着法，比较与引擎推荐的差异。</p></div></div><label class="plan-label">我的计划<textarea v-model="planIdea" rows="2" maxlength="1200"/></label><label class="plan-label">准备走的着法<input v-model="planMove" placeholder="炮二平五 或 h2e2" maxlength="40"/></label><button class="secondary" :disabled="planBusy||!planIdea.trim()||!planMove.trim()" @click="analyzePlanNow">{{ planBusy?'分析中…':'比较着法' }}</button><template v-if="planAnalysis"><p class="help">当前视角：{{ planAnalysis.perspective==='black'?'黑方':'红方' }}；引擎最佳：{{ planAnalysis.best.label }}（{{ planScore(planAnalysis.best.score) }}）；你的着法：{{ planAnalysis.proposed.label }}（{{ planScore(planAnalysis.proposed.score) }}）。<template v-if="planAnalysis.comparison_status==='cp'">差值 {{ planAnalysis.score_difference_cp??'—' }} cp。</template><template v-else-if="planAnalysis.comparison_status==='mate'">双方结果包含将杀，差值不换算为 cp。</template></p><p v-if="planAnalysis.ai_message" class="help">{{ planAnalysis.ai_message }}</p><template v-if="planAnalysis.explanation"><p>{{ planAnalysis.explanation.engine_assessment }}</p><p>{{ planAnalysis.explanation.suggestion }}</p></template></template></section>
         <ReviewView v-show="tab==='review'" :side="side" :result="reviewResult" :busy="reviewBusy" :error="reviewError" :selected-ply="selectedPly" @start="runReview" @select="selectReview" @coach="askCoachAboutReview"/>
