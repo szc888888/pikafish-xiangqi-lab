@@ -1,6 +1,8 @@
 # Pikafish Xiangqi Lab
 
-Pikafish Xiangqi Lab 是一个面向中文用户的象棋对弈、分析和复盘工作台。前端提供棋盘交互，后端通过 UCI 协议调用 Pikafish；棋规校验由项目规则模块负责，引擎负责评估和给出建议。
+Pikafish Xiangqi Lab 是一个面向中文用户的象棋大厅与分析工作台。首页提供 20 位明确标注的 AI 棋友，用户可以按“休闲娱乐、日常练习、挑战高手”选择推荐对象，也可以随机挑战；进入对局后复用现有棋盘、五档棋力、提示、分析和复盘能力。
+
+项目坚持“规则优先”：`apps/api/app/xiangqi.py` 和前端规则镜像负责合法着法、将死、困毙、重复局面和长将/长捉判定；Pikafish 只负责评估和候选着法，任何引擎着法落库前都必须重新通过规则校验。
 
 > `start.ps1` 用于本机开发和体验，不是生产部署脚本。正式上线前请完成本文的生产配置，并按[账号、隐私与 PostgreSQL 备份运行手册](docs/operations/account-and-backup.md)执行部署检查。
 
@@ -12,15 +14,28 @@ Pikafish Xiangqi Lab 是一个面向中文用户的象棋对弈、分析和复�
 - **轻量 AI 陪练**：对弈中点击“复盘”，弹窗回看当前棋谱的最多三个关键时刻、一句话说明和推荐走法；可对比行棋前、实战及推荐局面，并围绕该时刻追问教练。规则确认将死或困毙后自动生成小结，点击“查看小结”打开；关闭窗口继续原对局。小结无需配置大模型，AI 追问需要配置；引擎思考中、摆棋中、无走法或超过 120 个半回合时暂不可复盘。分析使用独立棋谱快照，期间继续下棋不会修改或混入该结果。
 - **提示与悔棋记录**：点击“提示一步”后保存当前局面的候选着法、最佳提示和评估信息；点击“悔棋”后保存撤回的半回合及悔棋后的局面。记录在复盘弹窗中分 Tab 展示，点击单条记录可回看当时棋盘；提示、悔棋和前进操作不会破坏主棋谱的一致性。
 - **棋局数据持久化与兼容**：账号、棋局、走法记录、提示/悔棋事件、复盘结果和隐私同意记录可保存至数据库或浏览器本地存档；支持游客棋局登录后迁移、旧格式棋局导入、数据导出、账号删除请求及删除恢复流程。
+- **AI 棋友大厅**：20 个棋友来自服务端静态目录，保存 `bot_id`、目录版本和创建时快照；推荐和随机挑战由服务端选择，客户端不能覆盖引擎参数。大厅回合支持 `expected_version`、`turn_id` 幂等和 `awaiting_ai` 断线恢复。
+- **共享引擎与有界并发**：单 Uvicorn worker 复用一个 Pikafish 进程，最多 1 个搜索和 2 个排队请求，排队最多等待 5 秒；不使用 `Skill Level` 或 `UCI_Elo`，五档棋力由应用层 profile、候选过滤和选招策略控制。
+- **游客优先体验**：游客对局先保存在浏览器 `localStorage`；登录并同意隐私后可保存云端正式局。游客局导入账号后不会计入正式战绩，正式统计只纳入明确结束的云端大厅对局。
 - **账号选择**：支持第三方 OIDC 登录；未配置 OIDC 时提供邮箱和密码注册/登录。首版默认不要求邮件验证，因此不依赖 SMTP。若启用邮箱验证和密码找回，需另配邮件服务。
 - **可选 AI 教练**：未配置大语言模型也可使用引擎对弈、分析和复盘；配置 OpenAI 兼容服务后可进行连续教练问答、思路解释和棋盘图片识别。
 - **备份工具**：提供 PostgreSQL 加密备份、Windows 每日计划任务和隔离数据库恢复脚本；备份密钥及删除账本需独立、安全保存。
 
 ## 界面预览
 
+### 立体木纹棋盘
+
+![立体木纹棋盘主题预览](docs/images/board-wood-preview.png)
+
+应用内棋盘风格选择器提供“立体木纹”主题，包含木纹表面、浮雕棋子和阴影高光。该配图用于展示主题材质；实际棋局状态仍以应用中的规则和棋谱为准。
+
+### 工作台截图
+
 ![Pikafish Xiangqi Lab 程序界面](docs/images/app-overview.png)
 
-界面左侧是可交互棋盘，右侧提供对弈、分析、复盘、教练和棋局入口，并集中展示当前对局状态与引擎设置。
+界面左侧是可交互棋盘，右侧提供棋友大厅、对弈、分析、复盘、教练和棋局入口，并集中展示当前对局状态与引擎设置。
+
+大厅展示全部 20 位 AI 棋友、体验分类、推荐棋友、随机挑战和最近棋局；页面不虚构真人在线数量或真人对局。
 
 ### 提示、悔棋与复盘记录
 
@@ -38,6 +53,26 @@ Pikafish Xiangqi Lab 是一个面向中文用户的象棋对弈、分析和复�
 | 数据存储 | SQLAlchemy、Alembic；生产环境使用 PostgreSQL，未设置数据库地址时本地开发默认 SQLite |
 | 身份认证 | OIDC、Argon2 密码哈希、Cookie 会话 |
 | 象棋引擎 | Pikafish UCI 与配套 NNUE 网络 |
+
+## V1 架构约束
+
+- AI 棋友目录：`apps/api/app/ai_friends.json`，固定 20 个启用棋友；配置由服务端校验，棋局保存创建时快照。
+- 大厅服务：`apps/api/app/game_hall.py` 编排用户着法、AI 搜索、规则复核、棋谱写入和同回合重试。
+- 持久化：`Game` 扩展大厅元数据，`GameTurn` 保存幂等回合；迁移文件为 `apps/api/alembic/versions/0007_ai_hall_v1.py`。
+- 部署：第一阶段固定一个 Uvicorn worker，避免每个 worker 启动一套 Pikafish。单 worker 最多 3 个在途引擎请求，超出容量或等待超过 5 秒会返回结构化错误。
+- 评级范围：V1 不实现 Glicko-2、初始棋力测评、动态评级、能力画像、个性化训练、对局后聊天、好友对弈和排行榜；“推荐棋友”只表达目标体验推荐。
+
+大厅相关接口包括：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/ai-friends` | 获取 20 个 AI 棋友目录，可按体验筛选 |
+| `POST /api/matches/recommend` | 按休闲、练习或挑战目标推荐棋友 |
+| `POST /api/matches/random` | 随机选择棋友 |
+| `POST /api/hall/games` | 创建云端 AI 棋友对局 |
+| `POST /api/games/{id}/turns` | 提交用户着法并完成可恢复的 AI 回合 |
+| `POST /api/games/{id}/resign` | 用户主动认输并记录正式赛果 |
+| `GET /api/me/game-stats` | 查询符合资格的大厅正式战绩 |
 
 ## 环境准备
 
@@ -82,7 +117,7 @@ python -m pip install -r requirements.txt
 alembic upgrade head
 ```
 
-如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0006_game_events`，其中包含棋局引擎设置和提示/悔棋事件存储。不要在已有数据的数据库上使用会删除表的重置操作。
+如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0007_ai_hall_v1`，包含棋局引擎设置、提示/悔棋事件、AI 棋友元数据和可恢复回合存储。执行前请备份已有数据库；不要使用会删除表的重置操作。
 
 ### 3. 准备 Pikafish（可选）
 
@@ -150,10 +185,10 @@ Docker 模式默认只绑定本机地址，使用开发配置，不应用作生�
 也可以分别启动，便于调试：
 
 ```powershell
-# 终端一：后端
+# 终端一：后端（固定单 worker）
 cd D:\chess\apps\api
 .\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 
 # 终端二：前端
 cd D:\chess\apps\web
@@ -161,7 +196,7 @@ npm install
 npm run dev
 ```
 
-打开 <http://127.0.0.1:1239>。API 健康检查地址为 <http://127.0.0.1:8000/api/health>。
+打开 <http://127.0.0.1:1239>。API 健康检查地址为 <http://127.0.0.1:8000/api/health>。停止 `start.ps1` 启动的服务时，请停止对应的 API、Vite 和 Pikafish 子进程，不要结束其他项目的 Node/Python 进程。
 
 ## 生产部署流程
 
@@ -279,6 +314,9 @@ cd D:\chess\apps\api
 .\.venv\Scripts\Activate.ps1
 python -m pytest
 
+# 大厅 V1 定向测试
+python -m pytest -q tests/test_ai_friends.py tests/test_engine_concurrency.py tests/test_game_hall_api.py
+
 # 前端测试与生产构建
 cd D:\chess\apps\web
 npm test
@@ -289,4 +327,6 @@ npm run build
 
 - [账号、隐私与 PostgreSQL 备份运行手册](docs/operations/account-and-backup.md)：生产配置、加密备份、计划任务和恢复演练。
 - [Pikafish 引擎目录说明](engine/README.md)：引擎和 NNUE 安装方式。
+- [AI 棋友平台现状审查方案](docs/architecture/xiangqi-ai-hall-upgrade-proposal.md)：项目结构、引擎复用、对局数据和改造边界。
+- [象棋大厅 V1 实施计划](docs/superpowers/plans/2026-11-08-xiangqi-hall-v1-implementation-plan.md)：P0～P6 任务、接口合同、状态流转和验收记录。
 - [项目研发规范](AGENTS.md)：象棋规则、棋盘坐标、存档及测试要求。

@@ -4,6 +4,36 @@
 
 规则判断优先于界面展示和引擎输出。应复用现有规则模块，避免在不同模块重复实现互相矛盾的判定。
 
+## 当前产品与架构边界
+
+- 当前 V1 首页是“棋友大厅”，第一阶段只支持 AI 对手，不实现真人对弈、好友对弈或排行榜。
+- 20 个 AI 棋友定义在 `apps/api/app/ai_friends.json`，由 `apps/api/app/ai_friends.py` 加载和严格校验。棋友是稳定的展示身份与策略档位，不是 20 个独立引擎实例。
+- AI 棋友只允许引用现有五档 `companion`、`beginner`、`progress`、`serious`、`full`。不得使用 Pikafish 不支持或项目未验证的 `Skill Level`、`UCI_Elo`，客户端不得提交任意引擎参数。
+- 对局大厅服务位于 `apps/api/app/game_hall.py`，持久化模型位于 `apps/api/app/persistence.py`，HTTP 合同位于 `apps/api/app/models.py` 和 `apps/api/app/main.py`。前端大厅使用现有 Vue 3 单页体系和 `apps/web/src/components/AiFriendView.vue`，不要仅为大厅引入新框架或路由系统。
+- 每个大厅对局必须保存 `opponent_id`、目录版本和创建时快照。目录后续改名或调整棋力不能改变历史对局含义。
+
+### 引擎生命周期与并发
+
+- 第一阶段部署固定单 Uvicorn worker，启动命令必须包含 `--workers 1`；生产不要通过增加 worker 获得并行棋局能力。
+- 单 worker 复用一个 Pikafish 进程。所有 `start`、`reset`、`stop`、`analyze` 生命周期操作必须受同一协调机制保护，不能交错发送 UCI 命令。
+- 引擎最多允许 3 个在途请求：1 个搜索、2 个排队；排队等待最多 5 秒。超出容量返回结构化负载错误，等待超时返回结构化超时错误。
+- 搜索超时、进程退出、请求取消或候选非法时，必须清理/恢复 UCI 会话；不得让下一个请求接管半截 `position`、`go` 或 `bestmove` 流程。
+- AI 着法必须先经过 `apps/api/app/xiangqi.py` 的合法着法、将帅安全和长将/长捉校验，再写入棋谱。引擎不是规则裁判。
+
+### 大厅对局与数据生命周期
+
+- 大厅回合使用 `expected_version`、`turn_id` 和请求指纹幂等。用户着法落库后进入 `awaiting_ai`，AI 失败时保留 `ai_pending`，只能重试同一回合，不能接受下一步用户着法。
+- 正式赛果只来自将死、困毙、规则性和棋和用户主动认输。中途退出、浏览器关闭、引擎异常、摆棋、分析、复盘和未完成局不计入正式战绩；V1 不实现超时判负。
+- 游客对局优先保存在 `localStorage`。登录用户只有在隐私同意有效时才创建云端正式局；游客局导入账号后统一标记为 `origin=guest_import`、`counts_for_stats=false`，不得通过导入增加正式战绩。
+- 删除、导出、账号隔离和隐私同意必须复用现有数据生命周期接口，不能为大厅另建绕过路径。重开必须创建新对局，不能覆盖旧记录。
+- 用户 Glicko-2 评级、初始棋力测评、动态评级、能力画像、个性化训练、对局后聊天属于后续版本；V1 的“推荐棋友”只按休闲娱乐、日常练习、挑战高手筛选，不宣传精准棋力或 Elo。
+
+### 数据库与迁移
+
+- SQLAlchemy 模型改动必须同步新增 Alembic 迁移；当前大厅迁移为 `apps/api/alembic/versions/0007_ai_hall_v1.py`，不得回改已发布迁移。
+- 执行迁移前先核对实际 Alembic head、备份数据库并在隔离库完成 upgrade/downgrade/upgrade 演练。禁止把测试数据库、`.env`、引擎二进制、NNUE 或日志提交到版本库。
+- 旧棋局缺少大厅字段时使用兼容默认值，不得伪造 AI 对手、赛果或统计资格；棋谱必须仍能从起始 FEN 重建。
+
 ## 象棋规约
 
 ### 棋盘与坐标
