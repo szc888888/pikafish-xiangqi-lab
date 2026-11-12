@@ -507,8 +507,9 @@ async def random_match(payload: RandomMatchRequest) -> MatchResponse:
     return MatchResponse(match_type="random", opponent=_friend_summary(friend), catalog_version=catalog.catalog_version)
 
 
+# Keep archive replay in FastAPI's worker pool so it cannot block live turns.
 @app.get("/api/games", response_model=list[GameResponse])
-async def list_games(user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> list[GameResponse]:
+def list_games(user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> list[GameResponse]:
     games = db.scalars(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.deleted_at.is_(None)).order_by(Game.updated_at.desc())).all()
     for game in games:
         _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]))
@@ -566,7 +567,7 @@ async def create_hall_game(payload: HallGameCreateRequest, user: User = Depends(
 
 
 @app.post("/api/games/import", response_model=GameResponse, status_code=201)
-async def import_legacy_game(payload: LegacyGameImportRequest, response: Response, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+def import_legacy_game(payload: LegacyGameImportRequest, response: Response, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     if user.status != "active":
         raise _api_error(410, "account_unavailable", "账号正在删除或已删除")
     try:
@@ -640,7 +641,7 @@ async def import_legacy_game(payload: LegacyGameImportRequest, response: Respons
 
 
 @app.get("/api/games/{game_id}", response_model=GameResponse)
-async def get_game(game_id: str, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+def get_game(game_id: str, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     game = _owned_game(db, user, game_id)
     _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]))
     return _game_response(game)
@@ -659,7 +660,7 @@ async def update_game(game_id: str, payload: GameUpdateRequest, user: User = Dep
 
 
 @app.patch("/api/games/{game_id}/events", response_model=GameResponse)
-async def update_game_events(game_id: str, payload: GameEventsUpdateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+def update_game_events(game_id: str, payload: GameEventsUpdateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     game = _owned_game(db, user, game_id)
     if game.version != payload.expected_version:
         raise _api_error(409, "stale_game", "棋局已被其他页面更新，请刷新后重试")
@@ -1120,7 +1121,7 @@ async def get_persisted_review(review_id: str, user: User = Depends(get_consente
 
 
 @app.post("/api/openings", response_model=OpeningsResponse)
-async def openings(request: EngineRequest) -> OpeningsResponse:
+def openings(request: EngineRequest) -> OpeningsResponse:
     try:
         return lookup_openings(request.fen, request.moves)
     except ValueError as exc:

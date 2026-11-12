@@ -20,6 +20,7 @@ import { parseBoardTheme, type BoardTheme } from './lib/boardTheme'
 import { coachPosition } from './lib/coachPosition'
 import { nextStepSession } from './lib/coachNextStep'
 import { advanceMoves, undoMoves } from './lib/moveTimeline'
+import { optimisticHallUserMove } from './lib/hallTurnPresentation'
 import { createHintEvent, createUndoEvent, type GameEvent } from './lib/gameEvents'
 import { waitForMinimumElapsed } from './lib/minimumDelay'
 import { playMoveSteps } from './lib/movePlayback'
@@ -405,7 +406,18 @@ function useSavedGame(view:SavedGameView,replay=false){
   }catch{message.value='棋局记录损坏，无法载入'}
 }
 function removeGame(view:SavedGameView){const game=savedGames.value.find(item=>item.id===view.id);savedGames.value=savedGames.value.filter(g=>g.id!==view.id);if(currentGameId.value===view.id)currentGameId.value=null;persistGames();if(game?.serverVersion!==undefined)void deleteGame(view.id).catch(()=>{})}
-function resetGame(){if(hallMode.value&&hallOpponent.value){void beginHallGame(hallOpponent.value,side.value==='black'?'black':'red');return}saveCurrentGame();currentGameId.value=null;hallMode.value=false;hallCloud.value=false;hallOpponent.value=null;hallResult.value=null;hallTurnId.value=null;hallTurnMove.value=null;hallExpectedVersion.value=0;gameEvents.value=[];baseFen.value=START_FEN;position.value=parseFen(START_FEN);fenInput.value=START_FEN;history.value=[];futureMoves.value=[];redoBatchSize.value=null;selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];hint.value={move:null,label:null};hintCandidates.value=[];coachContext.value='';clearStudy();clearReview();planAnalysis.value=null;message.value='新局已开始';}
+function resetGame(){
+  if(status.value==='thinking'||hallBusy.value||replayBusy.value)return
+  // Hall turns already persist their own moves and opponent snapshot.
+  if(hallMode.value)persistGames();else saveCurrentGame()
+  currentGameId.value=null;hallMode.value=false;hallCloud.value=false;hallOpponent.value=null;hallResult.value=null;hallTurnId.value=null;hallTurnMove.value=null;hallExpectedVersion.value=0;hallError.value=''
+  gameEvents.value=[];baseFen.value=START_FEN;position.value=parseFen(START_FEN);fenInput.value=START_FEN;history.value=[];futureMoves.value=[];redoBatchSize.value=null;selected.value=null;analysis.value=null
+  setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[]
+  hint.value={move:null,label:null};hintCandidates.value=[];hintUsed.value=0;coachContext.value='';clearStudy();clearReview();planAnalysis.value=null
+  quickReview.invalidate();quickReview.snapshot.value=null;quickReview.result.value=null;quickReview.error.value='';quickReview.select(null);reviewDialogOpen.value=false;lastAutomaticReview=''
+  status.value='idle';message.value='新局已开始'
+  if(side.value==='black'&&engineReady.value)void askEngine(true)
+}
 function loadFen(){try{saveCurrentGame();position.value=parseFen(fenInput.value);baseFen.value=toFen(position.value);fenInput.value=baseFen.value;history.value=[];gameEvents.value=[];futureMoves.value=[];redoBatchSize.value=null;currentGameId.value=null;selected.value=null;analysis.value=null;setupMode.value=false;setupDraft.value=null;setupTool.value='move';setupSelectedSquare.value=null;setupHistory.value=[];setupErrors.value=[];coachContext.value='';clearStudy();clearReview();message.value='局面已加载'}catch(error){message.value=error instanceof Error?error.message:'FEN 无效'}}
 async function undo(){
   if(!canUndo.value)return
@@ -522,11 +534,15 @@ async function matchHall(kind:'recommend'|'random',experience:'casual'|'practice
 }
 async function playHallMove(userUci:string|null){
   const record=savedGames.value.find(item=>item.id===currentGameId.value);if(!record||!hallOpponent.value||hallBusy.value)return
+  const turnStartedAt=Date.now()
   hallBusy.value=true;status.value='thinking';hallError.value='';hallTurnId.value??=`turn-${globalThis.crypto?.randomUUID?.()??Date.now().toString(36)}`;hallTurnMove.value=userUci
   try{
     if(hallCloud.value){
-      record.pendingTurnId=hallTurnId.value;record.pendingUserUci=userUci;record.pendingExpectedVersion??=hallExpectedVersion.value;record.status='awaiting_ai';record.updatedAt=new Date().toISOString();persistGames()
+      const pending=optimisticHallUserMove(record.moves,userUci,hallTurnId.value,record.pendingTurnId??null,record.pendingUserUci??null)
+      record.moves=pending.moves;record.pendingTurnId=pending.pendingTurnId;record.pendingUserUci=pending.pendingUserUci;record.pendingExpectedVersion??=hallExpectedVersion.value;record.status='awaiting_ai';record.updatedAt=new Date().toISOString();persistGames()
+      if(userUci){position.value=rebuildPosition(record.baseFen,record.moves);history.value=[...record.moves];fenInput.value=toFen(position.value);selected.value=null;message.value=`已走 ${userUci}，${hallOpponent.value.name} 思考中…`}
       const response=await submitHallTurn(record.id,{turn_id:hallTurnId.value,expected_version:record.pendingExpectedVersion,user_uci:userUci})
+      if(response.ai_move)await waitForMinimumElapsed(turnStartedAt,ENGINE_MOVE_MINIMUM_DELAY_MS)
       const remote=response.game;hallExpectedVersion.value=remote.version;record.moves=remote.moves.map(move=>move.uci);record.status=remote.status;record.result=remote.result;record.terminationReason=remote.termination_reason;record.updatedAt=remote.updated_at;record.serverVersion=remote.version;record.syncedMoves=record.moves.length;if(remote.status==='finished')hallResult.value=remote.result??null
       position.value=rebuildPosition(record.baseFen,record.moves);history.value=[...record.moves];record.pendingTurnId=remote.pending_turn_id??null;record.pendingUserUci=null;record.pendingExpectedVersion=remote.pending_turn_expected_version??null;persistGames();fenInput.value=toFen(position.value);message.value=remote.status==='finished'?'对局结束':`${hallOpponent.value.name} 已应手`
     }else{
@@ -537,6 +553,7 @@ async function playHallMove(userUci:string|null){
       else if(position.value.redToMove!==(side.value==='red')){
         record.moves=[...history.value];record.status='awaiting_ai';record.pendingTurnId=hallTurnId.value;record.pendingUserUci=userUci;record.updatedAt=new Date().toISOString();persistGames()
         const result=await engineMove({fen:baseFen.value,moves:[...history.value],difficulty:hallOpponent.value.strength_profile,allow_suboptimal:true,game_id:record.id,ply:history.value.length,depth:depth.value,movetime_ms:movetime.value,multipv:1,threads:1,hash_mb:hashMb.value})
+        await waitForMinimumElapsed(turnStartedAt,ENGINE_MOVE_MINIMUM_DELAY_MS)
         const candidate=result.bestmove;const next=applyMove(position.value,fromUci(candidate.slice(0,2)),fromUci(candidate.slice(2)));position.value=next;history.value.push(candidate)
         const ended=localHallTerminal();if(ended){record.status='finished';record.result=ended.result;record.terminationReason=ended.status;hallResult.value=record.result}
       }
