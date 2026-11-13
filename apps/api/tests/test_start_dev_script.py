@@ -7,7 +7,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
 
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows launcher runtime test requires Windows and PowerShell")
 def test_start_script_dry_run_describes_both_services():
     root = Path(__file__).resolve().parents[3]
     script = root / "start.ps1"
@@ -84,6 +87,7 @@ def test_worker_logs_process_start_errors_and_exit_code():
     assert "`$processExitCode = [int]`$LASTEXITCODE" in script_text
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows launcher runtime test requires Windows and PowerShell")
 def test_dry_run_does_not_create_project_logs():
     root = Path(__file__).resolve().parents[3]
     script = root / "start.ps1"
@@ -110,6 +114,7 @@ def test_dry_run_does_not_create_project_logs():
     assert after == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows launcher runtime test requires Windows and PowerShell")
 def test_worker_captures_and_rotates_oversized_output():
     root = Path(__file__).resolve().parents[3]
     script_text = (root / "start.ps1").read_text(encoding="utf-8")

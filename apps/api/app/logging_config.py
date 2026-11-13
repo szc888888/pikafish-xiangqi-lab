@@ -62,6 +62,7 @@ _FIELD_LIMITS = {
     "nnue_path": 512,
 }
 _EVENT_NAME = re.compile(r"^[a-z0-9_.-]{1,80}$")
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _safe_scalar(value: Any, field: str) -> str:
@@ -76,6 +77,28 @@ def _safe_scalar(value: Any, field: str) -> str:
     text = "".join(char if char.isprintable() else "_" for char in text)
     limit = _FIELD_LIMITS.get(field, 120)
     return text[:limit] or "-"
+
+
+def exception_stack_locations(exc: BaseException) -> str:
+    """Keep the failure site within the bounded log field, without payloads.
+
+    Tracebacks start at the caller. Logging that order with absolute paths can
+    consume the entire field before the actual failure is reached. Reverse the
+    frames and use project-relative paths (or module/file for dependencies).
+    Do not format exception messages, source lines, or frame locals.
+    """
+    locations = []
+    traceback = exc.__traceback__
+    while traceback is not None:
+        code = traceback.tb_frame.f_code
+        path = Path(code.co_filename)
+        try:
+            source = path.relative_to(_PROJECT_ROOT).as_posix()
+        except ValueError:
+            source = "/".join(path.parts[-2:])
+        locations.append(f"{source}:{traceback.tb_lineno}:{code.co_name}")
+        traceback = traceback.tb_next
+    return _safe_scalar("|".join(reversed(locations)), "stack_locations")
 
 
 def _populate_safe_fields(record: logging.LogRecord) -> None:

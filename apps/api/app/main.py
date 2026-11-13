@@ -18,7 +18,7 @@ from starlette.responses import RedirectResponse, Response
 from starlette.requests import Request
 from starlette.middleware.sessions import SessionMiddleware
 
-from .logging_config import REQUEST_ID_HEADER, configure_logging, get_logger, request_id_context
+from .logging_config import REQUEST_ID_HEADER, configure_logging, exception_stack_locations, get_logger, request_id_context
 
 from .engine import EngineQueueFull, EngineQueueTimeout, EngineRuleViolation, EngineUnavailable, PikafishEngine
 from .engine_strength import profile_for, select_candidate
@@ -154,14 +154,6 @@ async def request_logging_middleware(request: Request, call_next):
         elapsed_ms = (time.perf_counter() - started) * 1000
         route = request.scope.get("route")
         route_template = getattr(route, "path", None) or "<unmatched-route>"
-        traceback = exc.__traceback__
-        stack_locations = []
-        while traceback is not None:
-            frame = traceback.tb_frame
-            stack_locations.append(
-                f"{frame.f_code.co_filename}:{traceback.tb_lineno}:{frame.f_code.co_name}"
-            )
-            traceback = traceback.tb_next
         logger.error(
             "request_failed",
             extra={
@@ -171,7 +163,7 @@ async def request_logging_middleware(request: Request, call_next):
                 "status": 500,
                 "duration_ms": round(elapsed_ms, 2),
                 "exception_type": type(exc).__name__,
-                "stack_locations": "|".join(stack_locations),
+                "stack_locations": exception_stack_locations(exc),
             },
         )
         raise

@@ -344,6 +344,8 @@ OIDC 如需启用，另行配置 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT
 
 ## 常用测试
 
+macOS 可从 `apps/api` 执行 `.venv/bin/python -m pytest -q -rs`。Windows 启动脚本的 3 项运行测试在非 Windows 系统上会明确标记为跳过，脚本静态检查仍会执行；这些运行测试需在安装了 PowerShell 的 Windows 环境完成。macOS 启动脚本测试在非 POSIX 环境跳过。跳过不代表对应平台的运行验证已通过。
+
 ```powershell
 # 后端测试
 cd D:\chess\apps\api

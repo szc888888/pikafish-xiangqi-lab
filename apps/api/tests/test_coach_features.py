@@ -104,7 +104,8 @@ def test_logging_structured_allowlist_writes_safe_api_and_engine_fields(tmp_path
                 handler.close()
 
 
-def test_logging_request_id_correlation_and_exception_response(tmp_path):
+@pytest.mark.parametrize("stack_depth", [0, 80])
+def test_logging_request_id_correlation_and_exception_response(tmp_path, stack_depth):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.logging_config import configure_logging
@@ -112,9 +113,17 @@ def test_logging_request_id_correlation_and_exception_response(tmp_path):
     prompt_sentinel = "private-prompt-sentinel"
     fen_sentinel = "private-fen-sentinel"
 
+    def _logging_failure_origin():
+        raise RuntimeError(f"{prompt_sentinel} {fen_sentinel}")
+
+    def _logging_wrapper(remaining):
+        if remaining:
+            return _logging_wrapper(remaining - 1)
+        return _logging_failure_origin()
+
     @app.get("/__logging_failure")
     async def _logging_failure():
-        raise RuntimeError(f"{prompt_sentinel} {fen_sentinel}")
+        return _logging_wrapper(stack_depth)
 
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -132,9 +141,17 @@ def test_logging_request_id_correlation_and_exception_response(tmp_path):
         assert "RuntimeError" in logged
         assert "stack_locations=" in logged
         assert "test_coach_features.py" in logged
+        failed_line = next(line for line in logged.splitlines() if "event=request_failed " in line)
+        stack = failed_line.split("stack_locations=", 1)[1].split(" operation=", 1)[0]
+        assert stack.split("|", 1)[0].endswith(":_logging_failure_origin")
+        assert len(stack) <= 1200
+        assert str(Path(__file__).resolve().parents[3]) not in stack
         assert prompt_sentinel not in logged
         assert fen_sentinel not in logged
     finally:
+        # This is the shared FastAPI app; do not leave the temporary route in
+        # place for the next parametrized case or later tests.
+        app.router.routes[:] = [route for route in app.router.routes if getattr(route, "endpoint", None) is not _logging_failure]
         app_logger = logging.getLogger("app")
         for handler in list(app_logger.handlers):
             if getattr(handler, "_xiangqi_owned_handler", False):
