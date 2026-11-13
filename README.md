@@ -4,7 +4,7 @@ Pikafish Xiangqi Lab 是一个面向中文用户的象棋大厅与分析工作�
 
 项目坚持“规则优先”：`apps/api/app/xiangqi.py` 和前端规则镜像负责合法着法、将死、困毙、重复局面和长将/长捉判定；Pikafish 只负责评估和候选着法，任何引擎着法落库前都必须重新通过规则校验。
 
-> `start.ps1` 用于本机开发和体验，不是生产部署脚本。正式上线前请完成本文的生产配置，并按[账号、隐私与 PostgreSQL 备份运行手册](docs/operations/account-and-backup.md)执行部署检查。
+> `start.ps1`（Windows）和 `start.sh`（macOS）用于本机开发和体验，不是生产部署脚本。正式上线前请完成本文的生产配置，并按[账号、隐私与 PostgreSQL 备份运行手册](docs/operations/account-and-backup.md)执行部署检查。
 
 ## 项目特点
 
@@ -145,6 +145,42 @@ PIKAFISH_EVAL_FILE=D:\chess\engine\pikafish.nnue
 可查看 [引擎目录说明](engine/README.md)。程序和 NNUE 必须来自相互兼容的版本。
 
 ### 4. 启动服务
+
+#### macOS
+
+首次使用需准备 Python 3.11+、Node.js/npm 并安装依赖。例如使用 Homebrew：
+
+```bash
+brew install python@3.11 node
+cd /path/to/chess
+python3.11 -m venv apps/api/.venv
+apps/api/.venv/bin/python -m pip install -r apps/api/requirements.txt
+(cd apps/web && npm install)
+```
+
+可选引擎：从 [Pikafish 官方 Releases](https://github.com/official-pikafish/Pikafish/releases) 下载发布包，取出 `Pikafish-MacOS-universal` 和同包的 `pikafish.nnue`，放入 `engine/Pikafish/`（已忽略）。执行 `chmod +x engine/Pikafish/Pikafish-MacOS-universal`，并在项目根目录 `.env` 配置实际绝对路径：
+
+```dotenv
+PIKAFISH_PATH=/path/to/chess/engine/Pikafish/Pikafish-MacOS-universal
+PIKAFISH_EVAL_FILE=/path/to/chess/engine/Pikafish/pikafish.nnue
+```
+
+按前文说明配置 `SESSION_SECRET` 等本地环境变量，然后运行：
+
+```bash
+./start.sh --dry-run  # 预览命令，不创建文件或启动服务
+./start.sh            # 后台启动 API 和 Vite，关闭终端后继续运行
+./start.sh --restart  # 重启此脚本管理的服务
+./start.sh --stop     # 停止此脚本管理的服务及引擎子进程
+```
+
+前端为 <http://127.0.0.1:1239/>，健康检查为 <http://127.0.0.1:8000/api/health>。脚本可从其他目录调用，路径包含空格也可使用；固定单 Uvicorn worker，重复启动复用此脚本管理的健康进程。进程日志为 `logs/api-macos.log`、`logs/web-macos.log`，启动时若超过 5 MiB 则保留一份旧日志；运行期间仍会追加。启动失败会显示最近 40 行日志，并清理本次新启动的进程。
+
+脚本不会自动安装依赖、下载引擎或执行数据库迁移；缺少依赖时会给出安装命令。后端继续读取根目录 `.env`，无数据库配置时使用本地 SQLite；已有数据库如需迁移，遵循前文的备份和迁移流程。未配置引擎时前后端仍可启动，但会提示引擎未就绪。端口被其他启动方式占用时会拒绝启动，请先停止旧服务；`--stop` 不会停止其他方式启动的服务。生命周期操作用文件锁串行执行，PID 与进程启动时间一并校验，避免陈旧记录误停其他进程。停止时先向已确认归属的整个进程组发送 SIGTERM，等待 10 秒后仍有存活子进程才发送 SIGKILL。
+
+若父进程意外退出但进程组仍有子进程，脚本会保留记录并报错，显示需要手工检查的进程组编号；归属无法再次确认时不会自动结束这些进程。
+
+#### Windows
 
 推荐在项目根目录运行 Windows 一键开发启动脚本：
 
