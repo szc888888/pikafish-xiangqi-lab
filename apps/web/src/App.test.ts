@@ -14,6 +14,8 @@ vi.mock('./lib/api', async importOriginal => ({
   getHealth: vi.fn().mockResolvedValue({ engine_ready: true }),
   getOpenings: vi.fn().mockResolvedValue({ matches: [] }),
   createHallGame: vi.fn(),
+  importGame: vi.fn(),
+  getGame: vi.fn(),
   submitHallTurn: vi.fn(),
   engineMove: vi.fn(() => new Promise(() => {})),
   review: vi.fn().mockResolvedValue({ items: [], analyzed_plies: 0, final_score: null }),
@@ -55,6 +57,21 @@ beforeEach(() => {
 afterEach(() => { unmount?.(); unmount = undefined; vi.unstubAllGlobals() })
 
 describe('saved game navigation', () => {
+  it('uploads one local game with its events and replaces its local identity only after verification', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('local-game', '2026-11-12', '2026-11-12'), moves: ['a3a4', 'a6a5'], events: [{ id: 'event-1' }] }
+    state.savedGames = [game]
+    state.currentUser = { id: 'user-1', status: 'active', privacy_accepted: true }
+    state.currentGameId = game.id
+    const remote = { id: 'cloud-game', version: 2, moves: [{ uci: 'a3a4' }, { uci: 'a6a5' }], events: game.events }
+    vi.mocked(api.importGame).mockResolvedValue(remote as any)
+    vi.mocked(api.getGame).mockResolvedValue(remote as any)
+    await state.uploadSavedGame(game)
+    expect(api.importGame).toHaveBeenCalledWith(expect.objectContaining({ legacy_id: 'local-game', moves: game.moves, events: game.events, user_side: 'red' }))
+    expect(state.savedGames).toHaveLength(1)
+    expect(state.savedGames[0]).toMatchObject({ id: 'cloud-game', serverVersion: 2, syncedEvents: 1 })
+    expect(state.currentGameId).toBe('cloud-game')
+  })
   it('shows forward beside undo and restores loaded moves after undoing to the start', async () => {
     const state = await mountApp()
     const game = {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, createHallGame, deleteGame, engineMove, forgotPassword, getAiFriends, getAuthMethods, getGame, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, importGame, loginEmail, logout, persistReview, randomMatch, recognizeSetupImage, recommendMatch, registerEmail, requestEmailVerification, resetEngine, resetPassword, review, resignHallGame, submitHallTurn, updateGameEvents, verifyEmail, type AiFriend, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PersistedGameEvent, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
-import { migrateLegacyGames } from './lib/legacyGameMigration'
+import { importLegacyVersion, migrateLegacyGames } from './lib/legacyGameMigration'
 import { applyMove, clonePosition, describeUci, fromUci, legalTargets, movePiece, parseFen, perpetualCheckSide, perpetualChaseSide, setPiece, START_FEN, toFen, toUci, validateSetupPosition, type Piece, type Position } from './lib/xiangqi'
 import { listRecognizedPieces } from './lib/recognitionPositions'
 import { recognitionControls } from './lib/recognitionState'
@@ -289,17 +289,30 @@ return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.up
 }
 function gameEngineSettings(game:SavedGame):PersistedEngineSettings{return{difficulty:game.difficulty,allow_suboptimal:game.difficultySettings.allow_suboptimal,depth:game.difficultySettings.depth,movetime_ms:game.difficultySettings.movetime_ms,threads:game.difficultySettings.threads,hash_mb:game.difficultySettings.hash_mb}}
 interface GameMigrationResult { migrated:number; failed:number }
-async function migrateLocalGames():Promise<GameMigrationResult>{
-  const importable=savedGames.value.filter(game=>!(game.mode==='ai_hall'&&game.status==='finished'))
-  const imported=await migrateLegacyGames(importable,async(game)=>{
+const gameUploadBusy=ref(false)
+let gameUploadRevision=0
+async function importLocalGame(game:SavedGame){
     const localId=game.id
-    const remote=await importGame({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events,mode:game.mode??'legacy',user_side:game.userSide,opponent_id:game.opponentId,opponent_snapshot:game.opponentSnapshot})
+    const remote=await importLegacyVersion({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events,mode:game.mode??'legacy',user_side:game.userSide??(game.side==='watch'?undefined:game.side),opponent_id:game.opponentId,opponent_snapshot:game.opponentSnapshot},importGame)
     await getGame(remote.id)
     game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length;game.syncedEvents=remote.events.length
     if(currentGameId.value===localId)currentGameId.value=remote.id
+    gameUploadRevision++
     persistGames()
     return remote
-  })
+}
+async function uploadSavedGame(view:SavedGameView){
+  if(gameUploadBusy.value||!currentUser.value||currentUser.value.status!=='active'||currentUser.value.privacy_accepted===false)return
+  const game=savedGames.value.find(item=>item.id===view.id)
+  if(!game||game.serverVersion!==undefined||(game.mode==='ai_hall'&&game.status==='finished'))return
+  gameUploadBusy.value=true
+  try{await importLocalGame(game);message.value='棋局已上传云端，棋谱和操作记录已保存'}
+  catch(error){message.value=error instanceof Error?error.message:'棋局上传失败，请重试'}
+  finally{gameUploadBusy.value=false}
+}
+async function migrateLocalGames():Promise<GameMigrationResult>{
+  const importable=savedGames.value.filter(game=>!(game.mode==='ai_hall'&&game.status==='finished'))
+  const imported=await migrateLegacyGames(importable,importLocalGame)
   let migrated=imported.imported.length,failed=imported.failed.length
   const partialGames=savedGames.value.filter(game=>game.serverVersion!==undefined&&((game.syncedMoves??0)<game.moves.length||(game.syncedEvents??0)<game.events.length))
   for(const game of partialGames){
@@ -312,7 +325,10 @@ async function loadServerGames():Promise<GameMigrationResult>{
   try{currentUser.value=await getMe()}catch{currentUser.value=null;return empty}
   if(currentUser.value.status!=='active'||currentUser.value.privacy_accepted===false)return empty
   try{
-    const remote=await getGames(),localGames=savedGames.value,remoteGames=remote.map(serverGameRecord),remoteIds=new Set(remoteGames.map(game=>game.id))
+    const revision=gameUploadRevision
+    const remote=await getGames()
+    if(revision!==gameUploadRevision)return empty
+    const localGames=savedGames.value,remoteGames=remote.map(serverGameRecord),remoteIds=new Set(remoteGames.map(game=>game.id))
     const merged=remoteGames.map(remoteGame=>{
       const local=localGames.find(game=>game.id===remoteGame.id)
       if(!local)return remoteGame
@@ -610,7 +626,7 @@ onUnmounted(()=>{if(healthRefreshTimer!==undefined)window.clearInterval(healthRe
         <section v-show="tab==='analysis'" class="card plan-analysis"><div class="card-title"><div><h2>比较我的思路</h2><p class="help">输入计划和具体着法，比较与引擎推荐的差异。</p></div></div><label class="plan-label">我的计划<textarea v-model="planIdea" rows="2" maxlength="1200"/></label><label class="plan-label">准备走的着法<input v-model="planMove" placeholder="炮二平五 或 h2e2" maxlength="40"/></label><button class="secondary" :disabled="planBusy||!planIdea.trim()||!planMove.trim()" @click="analyzePlanNow">{{ planBusy?'分析中…':'比较着法' }}</button><template v-if="planAnalysis"><p class="help">当前视角：{{ planAnalysis.perspective==='black'?'黑方':'红方' }}；引擎最佳：{{ planAnalysis.best.label }}（{{ planScore(planAnalysis.best.score) }}）；你的着法：{{ planAnalysis.proposed.label }}（{{ planScore(planAnalysis.proposed.score) }}）。<template v-if="planAnalysis.comparison_status==='cp'">差值 {{ planAnalysis.score_difference_cp??'—' }} cp。</template><template v-else-if="planAnalysis.comparison_status==='mate'">双方结果包含将杀，差值不换算为 cp。</template></p><p v-if="planAnalysis.ai_message" class="help">{{ planAnalysis.ai_message }}</p><template v-if="planAnalysis.explanation"><p>{{ planAnalysis.explanation.engine_assessment }}</p><p>{{ planAnalysis.explanation.suggestion }}</p></template></template></section>
         <section v-show="tab==='review'" class="view-stack"><ReviewView :side="side" :result="reviewResult" :busy="reviewBusy" :error="reviewError" :selected-ply="selectedPly" @start="runReview" @select="selectReview" @coach="askCoachAboutReview"/></section>
         <CoachView v-show="tab==='coach'" :messages="coachMessages" :busy="coachBusy" :unavailable="coachUnavailable" @send="sendCoach" @next-step="askNextStep"/>
-        <GamesView v-show="tab==='games'" :games="savedGames" @continue="useSavedGame($event)" @replay="useSavedGame($event,true)" @remove="removeGame"/>
+        <GamesView v-show="tab==='games'" :games="savedGames" :can-upload="currentUser?.status==='active'&&currentUser?.privacy_accepted!==false" :upload-busy="gameUploadBusy" @upload="uploadSavedGame" @continue="useSavedGame($event)" @replay="useSavedGame($event,true)" @remove="removeGame"/>
         <SetupControls v-show="tab==='review'" :active="setupMode" :position="setupDraft" :selected-tool="setupTool" :can-undo="setupHistory.length > 0" :red-to-move="recognitionUi.pending ? recognitionPosition?.redToMove ?? setupDraft?.redToMove ?? position.redToMove : setupDraft?.redToMove ?? position.redToMove" :errors="setupErrors" :recognizing-image="recognitionBusy" :recognition-error="recognitionError" :recognition-preview-url="recognitionPreviewUrl" :recognition-piece-count="recognitionPieceCount" :recognition-pieces="recognitionPieces" :recognition-applied="recognitionApplied" :recognition-warnings="recognitionWarnings" :can-apply-recognition="canApplyRecognition" @start="startSetup" @cancel="cancelSetup" @undo="undoSetup" @clear="clearSetupBoard" @reset="resetSetupBoard" @finish="finishSetup" @update:selected-tool="setupTool=$event" @update:red-to-move="setSetupTurn($event)" @recognize-image="recognizeSetup" @cancel-recognition="cancelRecognition" @apply-recognition="applyRecognizedPosition" @discard-recognition="clearRecognition"/>
       </section>
     </section>
