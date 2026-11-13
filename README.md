@@ -342,24 +342,86 @@ OIDC 如需启用，另行配置 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT
 
 **发布注意事项：** 当前仓库提供的是应用代码与备份脚本，不包含可直接上线的完整基础设施配置。备份是每日全量方案；WAL/PITR、异地复制、告警、RPO/RTO 目标需要结合实际 PostgreSQL 服务单独配置并通过演练验证。尚未填入真实运营主体、隐私联系方式、第三方披露、密钥和备份存储配置前，不应把站点视为可正式运营。
 
-## 常用测试
+## 按环境运行测试
 
-macOS 可从 `apps/api` 执行 `.venv/bin/python -m pytest -q -rs`。Windows 启动脚本的 3 项运行测试在非 Windows 系统上会明确标记为跳过，脚本静态检查仍会执行；这些运行测试需在安装了 PowerShell 的 Windows 环境完成。macOS 启动脚本测试在非 POSIX 环境跳过。跳过不代表对应平台的运行验证已通过。
+各环境都需要 Python 3.11+、Node.js/npm。先按本机开发步骤安装 `apps/api/requirements.txt` 和前端 npm 依赖；`.venv`、`node_modules` 应在目标平台重新创建，不跨系统复制。下面分别使用项目虚拟环境中的 Python，无需先激活虚拟环境。
+
+### macOS（zsh/Bash）
+
+系统需提供 Bash 和 `ps`。将 `/path/to/chess` 替换为实际项目路径：
+
+```bash
+cd /path/to/chess/apps/api
+.venv/bin/python -m pytest -q -rs
+
+# 按需定位启动脚本或大厅相关问题
+.venv/bin/python -m pytest -q -rs tests/test_start_macos.py
+.venv/bin/python -m pytest -q -rs tests/test_ai_friends.py tests/test_engine_concurrency.py tests/test_game_hall_api.py
+
+cd ../web
+npm test
+npm run build
+
+# 仅显示启动命令，不启动服务或创建日志
+cd ../..
+./start.sh --dry-run
+```
+
+### Windows（PowerShell）
+
+运行 Windows 启动脚本测试需要能在 PATH 中找到 `pwsh` 或 `powershell`。缺少该工具时测试仍会失败，需要安装或修复 PATH；不会因为缺少工具而自动算作通过。
 
 ```powershell
-# 后端测试
 cd D:\chess\apps\api
-.\.venv\Scripts\Activate.ps1
-python -m pytest
+.\.venv\Scripts\python.exe -m pytest -q -rs
 
-# 大厅 V1 定向测试
-python -m pytest -q tests/test_ai_friends.py tests/test_engine_concurrency.py tests/test_game_hall_api.py
+# 按需定位启动脚本或大厅相关问题
+.\.venv\Scripts\python.exe -m pytest -q -rs tests/test_start_dev_script.py
+.\.venv\Scripts\python.exe -m pytest -q -rs tests/test_ai_friends.py tests/test_engine_concurrency.py tests/test_game_hall_api.py
 
-# 前端测试与生产构建
-cd D:\chess\apps\web
+cd ..\web
+npm test
+npm run build
+
+cd ..\..
+.\start.ps1 -DryRun
+```
+
+### Linux / WSL（Bash）
+
+使用 Linux 环境中的 Python、Node.js/npm 和依赖。安装 Bash 与提供 `ps` 的工具包（常见名称为 `procps` 或 `procps-ng`），并允许创建本机监听端口和进程组。后端测试会执行 POSIX 启动脚本测试：
+
+```bash
+cd /path/to/chess/apps/api
+.venv/bin/python -m pytest -q -rs
+.venv/bin/python -m pytest -q -rs tests/test_start_macos.py
+
+cd ../web
 npm test
 npm run build
 ```
+
+WSL 按 Linux 处理；验证 Windows 启动脚本时，需回到 Windows PowerShell 使用 Windows 虚拟环境。Linux 上通过 POSIX 测试不代表已经验证 macOS 实机或 macOS Pikafish 二进制。
+
+### 平台跳过规则与结果解读
+
+| 测试类别 | macOS | Windows | Linux / WSL |
+| --- | --- | --- | --- |
+| 象棋规则、接口、日志等通用后端测试 | 执行 | 执行 | 执行 |
+| Windows 启动脚本运行测试（`test_start_dev_script.py` 中的 3 项） | 跳过 | 执行，需 PowerShell | 跳过 |
+| Windows 启动脚本静态检查 | 执行 | 执行 | 执行 |
+| POSIX 启动脚本测试（`test_start_macos.py`） | 执行 | 跳过 | 执行，需 Bash、`ps` |
+| 前端 `npm test` 与 `npm run build` | 执行 | 执行 | 执行 |
+
+`-rs` 会列出跳过原因。报告应包含运行环境、实际命令及通过、失败、跳过的数量；数量以本次输出为准，不使用历史结果代替。按平台跳过不等于在对应平台验证通过；通用测试失败或适用平台缺少必需工具时仍应排查。
+
+启动脚本修改还需在目标系统验证实际启动、重复启动、停止、重启、端口冲突及引擎状态。真实引擎检查可在启动后访问 `/api/health`，并执行一次引擎搜索；测试和构建通过不代表引擎二进制及 NNUE 已正确安装。
+
+### 测试数据库、并发与 CI/容器
+
+后端 `tests/conftest.py` 将数据库地址固定为 `sqlite+pysqlite:///./test_suite.db`，即当前工作目录下的测试库。请按上述命令在 `apps/api` 中串行运行后端测试，不要同时启动多个 pytest 进程或使用 `pytest -n` 共享此库；代码审查或子代理也应遵守。需要并行验证时，为每个进程分配独立工作目录和测试库。仅在命令外设置 `DATABASE_URL` 无法覆盖此配置。不要提交测试数据库、journal/WAL 文件或日志。
+
+CI 和容器按执行环境选择测试。Linux 容器无法代替 Windows 或 macOS 验证；精简镜像还需补齐 Bash、`ps` 等适用测试工具，不能假定用于启动 API 的镜像已包含完整测试环境。跨平台发布时分别记录各目标系统的测试和构建结果。
 
 ## 相关文档
 

@@ -98,3 +98,20 @@
 - 修改接口或存档时，验证错误输入、旧格式兼容和棋谱重建。
 - 交付前运行相关后端测试、前端测试和生产构建，并报告实际命令及结果。
 - 规则不确定时记录假设，避免做出超出证据的裁定。
+
+### 按运行环境选择测试方法
+
+- 开始验证前确认当前操作系统、Shell、Python 版本和依赖是否安装。后端使用 Python 3.11+ 及 `apps/api/requirements.txt`，前端使用 Node.js/npm 及 `apps/web/package.json` 中的依赖。使用当前平台的虚拟环境，不复用其他操作系统生成的 `.venv` 或 `node_modules`。
+- 以下后端命令均在 `apps/api` 执行；前端命令均在 `apps/web` 执行。后端全量检查使用 `-rs` 显示跳过原因，不通过排除失败测试来宣称全量通过。
+
+| 环境 | 后端全量测试 | 启动脚本验证与平台限制 |
+| --- | --- | --- |
+| macOS（zsh/Bash） | `.venv/bin/python -m pytest -q -rs` | 定向运行 `tests/test_start_macos.py`；需要 Bash 和 `ps`。Windows 启动脚本的运行测试按平台跳过，静态检查仍执行。 |
+| Linux / WSL（Bash） | `.venv/bin/python -m pytest -q -rs` | POSIX 启动脚本测试会执行，需要 Bash、`ps` 和进程组能力；Windows 启动脚本的运行测试按平台跳过。Linux 结果不能代替 macOS 实机验证。 |
+| Windows（PowerShell） | `.\.venv\Scripts\python.exe -m pytest -q -rs` | 定向运行 `tests/test_start_dev_script.py`；必须安装 `pwsh` 或 `powershell`。缺少 PowerShell 属于环境不满足，应修复环境，不能标为通过；POSIX 启动脚本测试按平台跳过。 |
+
+- 各环境均需按改动范围执行前端 `npm test`、`npm run build`；大厅定向后端测试为 `tests/test_ai_friends.py tests/test_engine_concurrency.py tests/test_game_hall_api.py`，使用上表对应的 Python 命令运行。
+- 后端测试的 `tests/conftest.py` 将数据库地址设置为相对当前工作目录的 `test_suite.db`。同一工作目录只允许运行一个后端 pytest 进程，包括主任务、子代理和 CI；不得使用 `pytest -n` 并行共享此库。需要并行时使用独立工作目录和各自的测试库；仅从外部设置 `DATABASE_URL` 不能覆盖该测试配置。测试数据库及其 journal/WAL 文件不得提交。
+- CI/容器按实际执行测试的操作系统选择用例；Linux 容器里的结果不能替代 Windows PowerShell 或 macOS 实机结果。精简容器缺少 Bash、`ps` 等测试工具时，应补齐环境再执行适用测试，不能把工具缺失当作通过。
+- 启动脚本无副作用检查：macOS 在项目根目录运行 `./start.sh --dry-run`；Windows 运行 `.\start.ps1 -DryRun`。实际启停和引擎搜索另行在目标平台验证；单元测试、生产构建或 dry-run 均不能代替这项验证。
+- 交付时分别报告操作系统、实际命令、通过/失败/跳过数量与跳过原因。只验证了 macOS 时，不得声称 Windows/Linux 已验证；跳过不等于通过。完整准备步骤、定向命令见 `README.md` 的“按环境运行测试”。
