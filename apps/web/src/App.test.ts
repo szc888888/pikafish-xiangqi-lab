@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createRenderer, nextTick, ssrContextKey } from 'vue'
+import { createRenderer, createSSRApp, nextTick, ssrContextKey } from 'vue'
+import { renderToString } from '@vue/server-renderer'
 import App from './App.vue'
 import * as api from './lib/api'
 import { START_FEN, toFen } from './lib/xiangqi'
@@ -15,6 +16,7 @@ vi.mock('./lib/api', async importOriginal => ({
   createHallGame: vi.fn(),
   submitHallTurn: vi.fn(),
   engineMove: vi.fn(() => new Promise(() => {})),
+  review: vi.fn().mockResolvedValue({ items: [], analyzed_plies: 0, final_score: null }),
 }))
 
 // Mount the real App setup without a browser or child component rendering.
@@ -35,6 +37,12 @@ async function mountApp() {
   return (proxy.$ as unknown as { setupState: Record<string, any> }).setupState
 }
 
+async function forwardButton(state: Record<string, any>) {
+  const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+  const duel = html.split('<h2>人机对弈</h2>')[1]?.split('<h2>棋局状态</h2>')[0]
+  return duel?.match(/<button\b[^>]*>前进<\/button>/)?.[0]
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   const storage = new Map<string, string>()
@@ -46,7 +54,77 @@ beforeEach(() => {
 })
 afterEach(() => { unmount?.(); unmount = undefined; vi.unstubAllGlobals() })
 
+describe('saved game navigation', () => {
+  it('shows forward beside undo and restores loaded moves after undoing to the start', async () => {
+    const state = await mountApp()
+    const game = {
+      ...state.createGameRecord('saved-game', '2026-11-12', '2026-11-12'),
+      moves: ['a3a4', 'a6a5'],
+    }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await nextTick()
+
+    expect(state.tab).toBe('duel')
+    expect(await forwardButton(state)).toBeDefined()
+    expect(await forwardButton(state)).toContain('disabled')
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(html.match(/>前进<\/button>/g)).toHaveLength(1)
+
+    await state.undo()
+    await nextTick()
+    expect(state.history).toEqual([])
+    expect(toFen(state.position)).toBe(START_FEN)
+    expect(await forwardButton(state)).toBeDefined()
+    expect(await forwardButton(state)).not.toContain('disabled')
+
+    await state.redo()
+    await nextTick()
+    expect(state.history).toEqual(['a3a4', 'a6a5'])
+    expect(toFen(state.position)).toBe('rnbakabnr/9/1c5c1/2p1p1p1p/p8/P8/2P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1')
+    expect(await forwardButton(state)).toContain('disabled')
+    expect(api.engineMove).not.toHaveBeenCalled()
+  })
+
+  it('hides forward in a new game and after restarting a loaded game', async () => {
+    const state = await mountApp()
+    state.tab = 'duel'
+    expect(await forwardButton(state)).toBeUndefined()
+
+    const game = {
+      ...state.createGameRecord('loaded-game', '2026-11-12', '2026-11-12'),
+      moves: ['a3a4', 'a6a5'],
+    }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    expect(await forwardButton(state)).toBeDefined()
+
+    state.resetGame()
+    expect(await forwardButton(state)).toBeUndefined()
+  })
+})
+
 describe('duel new game', () => {
+  it('starts a playable red game after watching', async () => {
+    const state = await mountApp()
+    state.side = 'watch'
+    await nextTick()
+    expect(state.canHumanMove).toBe(false)
+
+    state.resetGame()
+    await nextTick()
+
+    expect(state.side).toBe('red')
+    expect(state.canHumanMove).toBe(true)
+    expect(state.canRequestHint).toBe(true)
+    expect(api.engineMove).not.toHaveBeenCalled()
+    state.clickSquare(6, 0)
+    state.clickSquare(5, 0)
+    expect(state.history).toEqual(['a3a4'])
+    expect(api.engineMove).toHaveBeenCalledTimes(1)
+    expect(api.engineMove).toHaveBeenCalledWith(expect.objectContaining({ moves: ['a3a4'] }))
+  })
+
   it('starts an ordinary game using the selected level after a hall game', async () => {
     const state = await mountApp()
     const friend = { bot_id: 'tea-sparrow', name: '茶香雀', strength_profile: 'companion' }
