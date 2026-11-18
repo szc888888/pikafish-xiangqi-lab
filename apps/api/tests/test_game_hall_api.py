@@ -3,7 +3,6 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ["DATABASE_URL"] = "sqlite+pysqlite:///./test_game_hall.db"
 os.environ["AUTH_MODE"] = "dev"
 
 from app.engine import EngineQueueFull, EngineUnavailable  # noqa: E402

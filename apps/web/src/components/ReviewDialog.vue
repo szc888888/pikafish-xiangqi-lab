@@ -9,7 +9,7 @@ import ReviewSummary from './ReviewSummary.vue'
 import { handleCoachInputKeydown } from '../lib/coachInput'
 import { eventHighlightMove, eventMoveLabels, eventPosition, eventSide, type GameEvent } from '../lib/gameEvents'
 
-const props = defineProps<{ snapshot: ReviewSnapshot; result: ReviewResponse | null; busy: boolean; error: string; board: Position; selected: ReviewItem | null; moments: ReviewItem[]; messages: CoachMessage[]; chatBusy: boolean; chatError: string; stale: boolean; theme: BoardTheme; retryReason: string }>()
+const props = defineProps<{ snapshot: ReviewSnapshot; result: ReviewResponse | null; busy: boolean; progress?: { completed: number; total: number }; error: string; board: Position; selected: ReviewItem | null; moments: ReviewItem[]; messages: CoachMessage[]; chatBusy: boolean; chatError: string; stale: boolean; theme: BoardTheme; retryReason: string }>()
 const emit = defineEmits<{ close: []; retry: []; select: [item: ReviewItem]; ask: [question: string] }>()
 const dialog = ref<HTMLElement | null>(null), closeButton = ref<HTMLButtonElement | null>(null)
 const question = ref(''), chatOpen = ref(false), preview = ref<'before' | 'actual' | 'better'>('before'), allMoves = ref(false)
@@ -70,8 +70,9 @@ onUnmounted(() => { document.body.style.overflow = previousOverflow; document.re
       <section ref="dialog" class="review-dialog" role="dialog" aria-modal="true" aria-labelledby="review-dialog-title" tabindex="-1">
         <header class="review-dialog-head"><div><p class="eyebrow">轻量 AI 陪练</p><h2 id="review-dialog-title">{{ busy ? '正在回看这局棋…' : '看懂关键一步，下局进步一点' }}</h2><p class="help">本次复盘：{{ snapshot.moves.length }} 个半回合 · 关闭后继续当前对局</p></div><button ref="closeButton" class="compact" @click="emit('close')">关闭复盘</button></header>
         <p v-if="stale" class="review-notice" role="status">当前对局已变化，以下展示的是打开复盘时的棋谱快照。</p>
-        <p v-if="busy" class="review-notice" role="status">正在逐局面分析，较长棋谱需要等待。可以关闭窗口继续下棋，结果就绪后再查看。</p>
+        <div v-if="busy" class="review-notice" role="status"><p>正在分析<template v-if="progress">：已完成 {{ progress.completed }} / {{ progress.total }} 个半回合</template>。长棋谱会自动分段，合并为整局结果。</p><progress v-if="progress?.total" :value="progress.completed" :max="progress.total" aria-label="整局复盘进度"/><p class="help">可以关闭窗口继续下棋，结果就绪后再查看。</p></div>
         <p v-if="error" class="validation review-notice" role="alert">{{ error }}</p>
+        <p v-if="result?.review_id" class="help" role="status">复盘已保存到账号，可在其他浏览器登录后查看。</p>
         <div class="review-dialog-grid">
           <div class="review-board-area"><BoardView :position="boardPosition" :interactive="false" :theme="theme" :last-move="selectedEvent ? eventHighlightMove(selectedEvent) : preview === 'actual' ? selected?.move : null" :highlight-move="boardHighlight"/><template v-if="selectedEvent"><p class="help">{{ selectedEvent.type === 'undo' ? '悔棋后的局面' : '提示时的局面' }} · 第 {{ selectedEvent.ply }} 半回合</p></template><template v-else-if="selected"><p class="help">第 {{ Math.ceil(selected.ply / 2) }} 回合 · {{ selected.side === 'red' ? '红方' : '黑方' }} · {{ preview === 'before' ? '行棋前局面' : preview === 'actual' ? '实战走法后' : '推荐走法后' }}</p><div class="review-preview-controls"><button :aria-pressed="preview === 'before'" @click="preview = 'before'">行棋前</button><button :aria-pressed="preview === 'actual'" @click="preview = 'actual'">实战：{{ selected.label }}</button><button v-if="selected.best_move" :aria-pressed="preview === 'better'" @click="preview = 'better'">推荐：{{ selected.best_label }}</button></div></template><p v-else class="help">当前复盘快照的最后局面</p></div>
           <div class="review-dialog-content">

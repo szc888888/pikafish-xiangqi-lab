@@ -24,7 +24,7 @@ from .engine import EngineQueueFull, EngineQueueTimeout, EngineRuleViolation, En
 from .engine_strength import profile_for, select_candidate
 from .ai_friends import AiFriend, get_friend, load_catalog, random_friend, recommend_friend, snapshot as friend_snapshot
 from .llm import LLMUnavailable, VisionRecognitionError, coach_chat, explain, recognize_board_image
-from .models import AiFriendSummary, AiFriendsResponse, MatchRequest, MatchResponse, RandomMatchRequest, HallGameCreateRequest, TurnRequest, ResignRequest, HallTurnResponse, GameResultResponse, GameStatsResponse, CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
+from .models import AiFriendSummary, AiFriendsResponse, MatchRequest, MatchResponse, RandomMatchRequest, HallGameCreateRequest, TurnRequest, ResignRequest, HallTurnResponse, GameResultResponse, GameStatsResponse, CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewSegmentRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
 from .auth import get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
@@ -33,6 +33,8 @@ from .persistence import DataRequest, DeletionTombstone, Game, GameMove, GameTur
 from .deletion_ledger import export_artifact_path, purge_expired_deletions, purge_expired_exports
 from .openings import lookup_openings
 from .review import review_game
+from . import cloud_review
+from .models import CloudReviewRequest, CloudReviewProgress, ReviewAdvanceRequest
 from .game_hall import HallTurnError, submit_turn
 from .xiangqi import Position, START_FEN, describe_uci, history_result, resolve_move_position, terminal_result, terminal_status, validate_candidate, validate_fen, validate_history, validate_moves
 from sqlalchemy import select, update
@@ -1074,6 +1076,87 @@ async def review(request: ReviewRequest) -> ReviewResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.post("/api/engine/review/segment", response_model=ReviewResponse)
+async def review_segment(request: ReviewSegmentRequest) -> ReviewResponse:
+    try:
+        cpu_count = os.cpu_count() or 1
+        if request.threads > cpu_count:
+            raise ValueError(f"线程数不能超过本机逻辑处理器数量 {cpu_count}")
+        return await review_game(engine, request.fen, request.moves, request.depth, request.movetime_ms, request.threads, request.hash_mb, start_ply=request.start_ply)
+    except ValueError as exc:
+        raise _api_error(400, _value_error_code(str(exc), "invalid_move_history"), str(exc)) from exc
+    except (EngineQueueFull, EngineQueueTimeout) as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
+    except EngineUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+_advancing_reviews: set[str] = set()
+
+
+def _owned_review(db: Session, user: User, review_id: str) -> Review:
+    saved = db.scalar(select(Review).options(selectinload(Review.items)).where(Review.id == review_id, Review.user_id == user.id))
+    if saved is None:
+        raise _api_error(404, "review_not_found", "复盘不存在")
+    _owned_game(db, user, saved.game_id)
+    return saved
+
+
+@app.post("/api/games/{game_id}/reviews/segmented", response_model=CloudReviewProgress)
+async def start_cloud_review(game_id: str, request: CloudReviewRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> CloudReviewProgress:
+    game = _owned_game(db, user, game_id)
+    if request.fen.strip() != game.initial_fen.strip() or [move.uci for move in game.moves] != request.moves:
+        raise _api_error(409, "game_snapshot_mismatch", "复盘棋谱与当前棋局不一致，请重新加载棋局")
+    _validate_game_projection(game, validate_history(game.initial_fen, request.moves))
+    if request.threads > (os.cpu_count() or 1):
+        raise _api_error(400, "invalid_parameters", "线程数不能超过本机逻辑处理器数量")
+    return cloud_review.start(db, user, game, request, engine)
+
+
+@app.post("/api/reviews/{review_id}/advance", response_model=CloudReviewProgress)
+async def advance_cloud_review(review_id: str, request: ReviewAdvanceRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> CloudReviewProgress:
+    saved = _owned_review(db, user, review_id)
+    if "_segmented" not in saved.parameters:
+        raise _api_error(409, "review_not_segmented", "此复盘不支持分段继续")
+    completed = cloud_review.metadata(saved)["completed_plies"]
+    if request.start_ply < completed or saved.status != "in_progress":
+        return cloud_review.progress(saved)
+    if request.start_ply != completed:
+        raise _api_error(409, "review_progress_mismatch", "复盘进度已变化，请重新读取进度")
+    # Deployment uses one worker. A review can advance only once at a time;
+    # searches still enter the shared engine's bounded concurrency coordinator.
+    if review_id in _advancing_reviews:
+        raise _api_error(409, "review_busy", "此复盘正在分析，请稍后重试")
+    _advancing_reviews.add(review_id)
+    user_id, session_version = user.id, user.session_version
+    fen, moves = saved.initial_fen_snapshot, list(saved.moves_snapshot)
+    end = min(completed + 30, len(moves))
+    parameters = dict(saved.parameters)
+    db.rollback()  # Release the read transaction during engine computation.
+    try:
+        result = await review_game(engine, fen, moves[:end], parameters["depth"], parameters["movetime_ms"], parameters["threads"], parameters["hash_mb"], start_ply=completed)
+        # Re-read after await: deletion, consent withdrawal, or session revocation
+        # during a search must prevent writing results back into the account.
+        db.expire_all()
+        current_user = db.get(User, user_id)
+        if current_user is None or current_user.status != "active" or current_user.session_version != session_version:
+            raise _api_error(410, "account_unavailable", "账号不可用，未保存此批复盘")
+        if os.getenv("AUTH_MODE") != "dev" and not has_consent(db, user_id):
+            raise _api_error(403, "privacy_consent_required", "请先阅读并同意隐私政策")
+        saved = _owned_review(db, current_user, review_id)
+        if cloud_review.metadata(saved)["completed_plies"] != completed:
+            raise _api_error(409, "review_progress_mismatch", "复盘进度已变化，请重新读取进度")
+        return cloud_review.save_segment(db, saved, result, end)
+    except ValueError as exc:
+        raise _api_error(400, _value_error_code(str(exc), "invalid_move_history"), str(exc)) from exc
+    except (EngineQueueFull, EngineQueueTimeout) as exc:
+        raise _api_error(503, exc.code, str(exc)) from exc
+    except EngineUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        _advancing_reviews.discard(review_id)
+
+
 @app.post("/api/games/{game_id}/reviews", response_model=PersistedReviewResponse)
 async def persist_review(game_id: str, request: ReviewRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> PersistedReviewResponse:
     game = _owned_game(db, user, game_id)
@@ -1106,9 +1189,7 @@ async def persist_review(game_id: str, request: ReviewRequest, user: User = Depe
 
 @app.get("/api/reviews/{review_id}")
 async def get_persisted_review(review_id: str, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> dict:
-    review = db.scalar(select(Review).options(selectinload(Review.items)).where(Review.id == review_id, Review.user_id == user.id))
-    if review is None:
-        raise _api_error(404, "review_not_found", "复盘不存在")
+    review = _owned_review(db, user, review_id)
     return {"id": review.id, "game_id": review.game_id, "status": review.status, "initial_fen": review.initial_fen_snapshot, "moves": review.moves_snapshot, "history_hash": review.history_hash, "engine_name": review.engine_name, "engine_version": review.engine_version, "nnue_version": review.nnue_version, "parameters": review.parameters, "summary": review.summary, "error_code": review.error_code, "items": [{"ply": item.ply, "side": item.side, "move": item.move, "best_move": item.best_move, "before_score": item.before_score, "after_score": item.after_score, "loss_cp": item.loss_cp, "mate_value": item.mate_value, "grade": item.grade, "pv": item.pv, "rule_stop_kind": item.rule_stop_kind, "rule_stop_message": item.rule_stop_message} for item in review.items]}
 
 

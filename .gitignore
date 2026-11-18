@@ -20,3 +20,6 @@ _ocr*
 _patch.py
 engine/Pikafish/
 engine/Pikafish.*.7z
+
+# macOS metadata on external volumes
+._*

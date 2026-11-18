@@ -2,7 +2,6 @@ import os
 
 from fastapi.testclient import TestClient
 
-os.environ["DATABASE_URL"] = "sqlite+pysqlite:///./test_privacy_consent.db"
 os.environ["AUTH_MODE"] = "oidc"
 
 from app.main import app  # noqa: E402

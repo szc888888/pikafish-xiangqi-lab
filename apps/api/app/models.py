@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EngineRequest(BaseModel):
@@ -122,6 +122,17 @@ class ReviewRequest(BaseModel):
     hash_mb: int = Field(default=128, ge=16, le=1024)
 
 
+class ReviewSegmentRequest(ReviewRequest):
+    moves: list[str] = Field(min_length=1, max_length=400)
+    start_ply: int = Field(default=0, ge=0, le=399)
+
+    @model_validator(mode="after")
+    def bounded_segment(self):
+        if not 1 <= len(self.moves) - self.start_ply <= 30:
+            raise ValueError("每批复盘必须分析 1 至 30 个半回合，并保留完整前缀棋谱")
+        return self
+
+
 class ReviewItem(BaseModel):
     ply: int
     side: Literal["red", "black"]
@@ -160,6 +171,23 @@ class PersistedReviewResponse(ReviewResponse):
     snapshot_hash: str
 
 
+class CloudReviewRequest(ReviewRequest):
+    moves: list[str] = Field(min_length=1, max_length=400)
+    reuse: bool = True
+
+
+class ReviewAdvanceRequest(BaseModel):
+    start_ply: int = Field(ge=0, le=399)
+
+
+class CloudReviewProgress(BaseModel):
+    review_id: str
+    completed_plies: int
+    total_plies: int
+    status: Literal["in_progress", "complete", "stopped_rule_violation"]
+    result: PersistedReviewResponse | None = None
+
+
 class OpeningLine(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
@@ -180,7 +208,7 @@ class CoachMessage(BaseModel):
 class CoachRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1200)
     fen: str = Field(min_length=1, max_length=200)
-    moves: list[str] = Field(default_factory=list, max_length=120)
+    moves: list[str] = Field(default_factory=list, max_length=400)
     messages: list[CoachMessage] = Field(default_factory=list, max_length=20)
     context: str = Field(default="", max_length=5000)
 

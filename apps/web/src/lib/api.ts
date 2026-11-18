@@ -7,7 +7,7 @@ export interface Analysis { bestmove: string; score: Score | null; depth: number
 export interface PlanAnalysis { best: { move: string; label: string; score: Score | null; depth: number | null; pv: string[] }; proposed: { move: string; label: string; score: Score | null; depth: number | null; pv: string[] }; score_difference_cp: number | null; explanation: { advantages: string[]; risks: string[]; engine_assessment: string; suggestion: string } | null; ai_available: boolean; ai_message: string | null; perspective?: 'red' | 'black'; comparison_status?: 'cp' | 'mate' | 'unavailable'; best_filter?: CandidateFilterSummary | null; proposed_filter?: CandidateFilterSummary | null }
 export interface ReviewItem { ply: number; side: 'red' | 'black'; move: string; label: string; best_move: string | null; best_label: string | null; before_score: Score | null; after_score: Score | null; loss_cp: number | null; grade: 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'unknown'; pv: string[] }
 export interface ReviewStop { ply: number; side: 'red' | 'black'; kind: 'perpetual_check' | 'perpetual_chase'; message: string }
-export interface ReviewResponse { items: ReviewItem[]; final_score: Score | null; analyzed_plies: number; status?: 'complete' | 'stopped_rule_violation'; stop?: ReviewStop | null }
+export interface ReviewResponse { items: ReviewItem[]; final_score: Score | null; analyzed_plies: number; status?: 'complete' | 'stopped_rule_violation'; stop?: ReviewStop | null; review_id?: string; game_id?: string; snapshot_hash?: string }
 export interface OpeningLine { name: string; aliases: string[]; source: string; matched_plies: number; next_moves: { move: string; label: string }[] }
 export interface CoachMessage { role: 'user' | 'assistant'; content: string }
 export interface SetupImageResult { fen: string; red_to_move: boolean; piece_count: number; warnings: string[] }
@@ -200,8 +200,50 @@ export interface EngineMove extends Analysis { difficulty: string; difficulty_la
 export const engineMove = (payload: { fen: string; moves: string[]; difficulty: string; allow_suboptimal: boolean; game_id: string; ply: number; depth: number; movetime_ms: number; multipv: number; threads: number; hash_mb: number }) => request<EngineMove>('/api/engine/move', { method: 'POST', body: JSON.stringify(payload) })
 export const validate = (payload: { fen: string; moves: string[] }) => post('/api/engine/validate', payload)
 export const analyzePlan = (payload: { fen: string; moves: string[]; idea: string; move: string; depth: number; movetime_ms: number; threads: number; hash_mb: number }) => request<PlanAnalysis>('/api/engine/plan-analysis', { method: 'POST', body: JSON.stringify(payload) })
-export const review = (payload: { fen: string; moves: string[]; depth?: number; movetime_ms?: number; threads?: number; hash_mb?: number }) => request<ReviewResponse>('/api/engine/review', { method: 'POST', body: JSON.stringify(payload) })
-export const persistReview = (gameId: string, payload: { fen: string; moves: string[]; depth?: number; movetime_ms?: number; threads?: number; hash_mb?: number }) => request<ReviewResponse & { review_id: string; game_id: string; snapshot_hash: string }>(`/api/games/${encodeURIComponent(gameId)}/reviews`, { method: 'POST', body: JSON.stringify(payload) })
+type ReviewPayload = { fen: string; moves: string[]; depth?: number; movetime_ms?: number; threads?: number; hash_mb?: number }
+export type ReviewProgress = (completed: number, total: number) => void
+export async function review(payload: ReviewPayload, progress?: ReviewProgress): Promise<ReviewResponse> {
+  if (payload.moves.length > 400) throw new Error('棋谱超过当前支持的 400 个半回合')
+  // Freeze the input so ongoing play cannot change a later batch.
+  const frozen = { ...payload, moves: [...payload.moves] }
+  progress?.(0, frozen.moves.length)
+  if (frozen.moves.length <= 120) {
+    const response = await request<ReviewResponse>('/api/engine/review', { method: 'POST', body: JSON.stringify(frozen) })
+    progress?.(response.analyzed_plies, frozen.moves.length)
+    return response
+  }
+  const items: ReviewItem[] = []
+  for (let start = 0; start < frozen.moves.length; start += 30) {
+    const end = Math.min(start + 30, frozen.moves.length)
+    const response = await request<ReviewResponse>('/api/engine/review/segment', { method: 'POST', body: JSON.stringify({ ...frozen, moves: frozen.moves.slice(0, end), start_ply: start }) })
+    items.push(...response.items)
+    progress?.(response.analyzed_plies, frozen.moves.length)
+    if (response.status === 'stopped_rule_violation' || end === frozen.moves.length) return { ...response, items }
+  }
+  throw new Error('复盘没有完成，请重试')
+}
+interface CloudReviewProgress { review_id: string; completed_plies: number; total_plies: number; status: 'in_progress' | 'complete' | 'stopped_rule_violation'; result: ReviewResponse | null }
+export async function persistReview(gameId: string, payload: ReviewPayload, progress?: ReviewProgress, refresh = false): Promise<ReviewResponse> {
+  if (payload.moves.length > 400) throw new Error('棋谱超过当前支持的 400 个半回合')
+  if (payload.moves.length > 120) {
+    const frozen = { ...payload, moves: [...payload.moves] }
+    progress?.(0, frozen.moves.length)
+    let state = await request<CloudReviewProgress>(`/api/games/${encodeURIComponent(gameId)}/reviews/segmented`, { method: 'POST', body: JSON.stringify({ ...frozen, reuse: !refresh }) })
+    progress?.(state.completed_plies, state.total_plies)
+    while (!state.result) {
+      if (state.status !== 'in_progress' || state.completed_plies >= frozen.moves.length || state.total_plies !== frozen.moves.length) throw new Error('云端复盘进度无效，请重试')
+      const previous = state.completed_plies
+      state = await request<CloudReviewProgress>(`/api/reviews/${encodeURIComponent(state.review_id)}/advance`, { method: 'POST', body: JSON.stringify({ start_ply: previous }) })
+      progress?.(state.completed_plies, state.total_plies)
+      if (!state.result && state.completed_plies <= previous) throw new Error('云端复盘进度未更新，请重试')
+    }
+    return state.result
+  }
+  progress?.(0, payload.moves.length)
+  const response = await request<ReviewResponse & { review_id: string; game_id: string; snapshot_hash: string }>(`/api/games/${encodeURIComponent(gameId)}/reviews`, { method: 'POST', body: JSON.stringify(payload) })
+  progress?.(response.analyzed_plies, payload.moves.length)
+  return response
+}
 export const getOpenings = (payload: { fen: string; moves: string[] }) => request<{ matches: OpeningLine[] }>('/api/openings', { method: 'POST', body: JSON.stringify(payload) })
 export const coachChat = (payload: { question: string; fen: string; moves: string[]; messages: CoachMessage[]; context: string }) => request<{ answer: string; ai_available: boolean; ai_message: string | null }>('/api/coach/chat', { method: 'POST', body: JSON.stringify(payload) })
 export const getMe = () => request<AuthUser>('/api/me')

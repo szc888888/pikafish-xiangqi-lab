@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { AiFriend } from '../lib/api'
+import { hallResultLabel, terminationLabel } from '../lib/hallResult'
 
 export interface HallRecentGame {
   id: string
@@ -10,6 +11,8 @@ export interface HallRecentGame {
   opponentName?: string
   result?: string | null
   status: string
+  userSide?: 'red' | 'black'
+  terminationReason?: string | null
 }
 
 const props = defineProps<{
@@ -20,8 +23,9 @@ const props = defineProps<{
   error: string
 }>()
 const emit = defineEmits<{
-  recommend: [experience: AiFriend['category']]
-  random: []
+  recommend: [experience: AiFriend['category'], side: 'red' | 'black']
+  random: [side: 'red' | 'black']
+  retry: []
   challenge: [botId: string, side: 'red' | 'black']
   openGames: []
 }>()
@@ -31,18 +35,11 @@ const category = ref<'all' | AiFriend['category']>('all')
 const selectedId = ref<string | null>(null)
 const side = ref<'red' | 'black'>('red')
 const filtered = computed(() => props.friends.filter(friend => category.value === 'all' || friend.category === category.value))
-const selectedFriend = computed(() => props.friends.find(friend => friend.bot_id === selectedId.value) ?? null)
 const experienceNames = { casual: '休闲娱乐', practice: '日常练习', challenge: '挑战高手' }
 const categoryNames = { casual: '休闲', practice: '练习', challenge: '挑战' }
 function date(value: string) {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString('zh-CN')
-}
-function resultLabel(result?: string | null) {
-  if (result === 'draw') return '和棋'
-  if (result === 'red_win') return '红胜'
-  if (result === 'black_win') return '黑胜'
-  return '进行中'
 }
 </script>
 
@@ -52,7 +49,7 @@ function resultLabel(result?: string | null) {
       <div class="hall-title">
         <p class="eyebrow">AI XIANGQI FRIENDS</p>
         <h2>选择一位 AI 棋友</h2>
-        <p>20 位风格各异的 AI 棋友，随时可以开始一盘象棋。</p>
+        <p>选择一位 AI 棋友，开始一盘轻松的象棋练习。</p>
       </div>
       <div class="hall-controls">
         <fieldset>
@@ -69,15 +66,15 @@ function resultLabel(result?: string | null) {
           </div>
         </fieldset>
         <div class="hall-actions">
-          <button class="primary" :disabled="busy || loading" @click="emit('recommend', experience)">推荐棋友</button>
-          <button :disabled="busy || loading" @click="emit('random')">随机挑战</button>
+          <button class="primary" :disabled="busy || loading || !friends.length" @click="emit('recommend', experience, side)">推荐棋友</button>
+          <button :disabled="busy || loading || !friends.length" @click="emit('random', side)">随机挑战</button>
         </div>
       </div>
     </section>
 
-    <p v-if="error" class="hall-error" role="alert">{{ error }}</p>
-    <div class="hall-section-title">
-      <h3>AI 棋友</h3>
+    <p v-if="error" class="hall-error" role="alert">{{ error }} <button :disabled="busy || loading" @click="emit('retry')">重新加载棋友</button></p>
+    <div class="hall-section-title" id="ai-friends-list">
+      <h3>挑选棋友</h3>
       <span>{{ friends.length }} 位</span>
       <div class="category-filter" role="group" aria-label="棋友分类">
         <button v-for="item in [{ id: 'all', label: '全部' }, { id: 'casual', label: '休闲' }, { id: 'practice', label: '练习' }, { id: 'challenge', label: '挑战' }]" :key="item.id" :class="{ active: category === item.id }" @click="category = item.id as typeof category">{{ item.label }}</button>
@@ -108,7 +105,7 @@ function resultLabel(result?: string | null) {
       <div v-if="recentGames.length" class="recent-list">
         <article v-for="game in recentGames.slice(0, 4)" :key="game.id" class="recent-game">
           <div><strong>{{ game.opponentName || game.name || '历史棋局' }}</strong><span>{{ date(game.startedAt) }} · {{ game.moveCount }} 半回合</span></div>
-          <span class="recent-result">{{ resultLabel(game.result) }}</span>
+          <span class="recent-result">{{ game.status === 'awaiting_ai' ? '等待 AI 应手，可继续恢复' : hallResultLabel(game.result, game.userSide) }}<small v-if="game.terminationReason"> · {{ terminationLabel(game.terminationReason) }}</small></span>
         </article>
       </div>
       <p v-else class="hall-empty">还没有已保存的棋局</p>

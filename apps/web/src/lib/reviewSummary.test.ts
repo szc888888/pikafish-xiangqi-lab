@@ -20,9 +20,11 @@ describe('lightweight review summary', () => {
     expect(momentExplanation(mate)).toContain('引擎')
     expect(momentExplanation(mate)).not.toContain('棋局结束')
   })
-  it('blocks invalid review states and accepts the 120-ply boundary', () => {
+  it('accepts long games through the 400-ply archive limit', () => {
     const ready = { setup: false, thinking: false, engineReady: true, plies: 120 }
     expect(reviewDisabledReason(ready)).toBe('')
-    for (const change of [{ setup: true }, { thinking: true }, { engineReady: false }, { plies: 0 }, { plies: 121 }]) expect(reviewDisabledReason({ ...ready, ...change })).not.toBe('')
+    expect(reviewDisabledReason({ ...ready, plies: 121 })).toBe('')
+    expect(reviewDisabledReason({ ...ready, plies: 400 })).toBe('')
+    for (const change of [{ setup: true }, { thinking: true }, { engineReady: false }, { plies: 0 }, { plies: 401 }]) expect(reviewDisabledReason({ ...ready, ...change })).not.toBe('')
   })
 })

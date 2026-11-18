@@ -20,7 +20,7 @@ export function reviewDisabledReason(state: { setup: boolean; thinking: boolean;
   if (state.setup) return '请先完成或退出摆棋'
   if (state.thinking) return '请等待引擎完成思考'
   if (!state.plies) return '走出第一步后即可复盘'
-  if (state.plies > 120) return '棋谱超过 120 个半回合，暂不能整局复盘'
+  if (state.plies > 400) return '棋谱超过当前支持的 400 个半回合'
   if (!state.engineReady) return '请先连接 Pikafish 引擎'
   return ''
 }

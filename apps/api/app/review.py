@@ -34,7 +34,7 @@ def classify_loss(before: Score | None, after_for_mover: Score | None) -> tuple[
     return "blunder", loss
 
 
-async def review_game(engine: PikafishEngine, fen: str, moves: list[str], depth: int, movetime_ms: int, threads: int, hash_mb: int) -> ReviewResponse:
+async def review_game(engine: PikafishEngine, fen: str, moves: list[str], depth: int, movetime_ms: int, threads: int, hash_mb: int, start_ply: int = 0) -> ReviewResponse:
     history = validate_history(fen, moves)
     issue = history.issue
     if issue and issue.code == "invalid_move":
@@ -48,16 +48,19 @@ async def review_game(engine: PikafishEngine, fen: str, moves: list[str], depth:
     ) if issue else None
 
     results = []
-    for ply in range(analyzed_plies + 1):
+    # Keep the entire original history for rule validation and UCI searches.
+    # Only evaluate the requested window, with one shared boundary position.
+    start = min(start_ply, analyzed_plies)
+    for ply in range(start, analyzed_plies + 1):
         results.append(await engine.analyze(fen, moves[:ply], depth, movetime_ms, 1, threads, hash_mb))
 
     items: list[ReviewItem] = []
-    for index in range(analyzed_plies):
+    for index in range(start, analyzed_plies):
         move = moves[index]
         position = history.positions[index]
         side = "red" if position.red_to_move else "black"
-        before = results[index]
-        after = results[index + 1]
+        before = results[index - start]
+        after = results[index - start + 1]
         after_for_mover = invert_score(after.score)
         grade, loss = classify_loss(before.score, after_for_mover)
         items.append(ReviewItem(

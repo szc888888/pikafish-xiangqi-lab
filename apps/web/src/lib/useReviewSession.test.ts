@@ -1,12 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { useReviewSession } from './useReviewSession'
 import { START_FEN, toFen } from './xiangqi'
-import type { ReviewResponse } from './api'
+import type { ReviewResponse, ReviewProgress } from './api'
 import { createHintEvent } from './gameEvents'
 
 const result: ReviewResponse = { items: [{ ply: 1, side: 'red', move: 'a3a4', label: '兵九进一', best_move: 'h2e2', best_label: '炮二平五', before_score: { type: 'cp', value: 0 }, after_score: { type: 'cp', value: -100 }, grade: 'mistake', loss_cp: 100, pv: ['h2e2'] }], final_score: null, analyzed_plies: 1 }
 const snapshot = () => ({ fen: START_FEN, moves: ['a3a4'], side: 'red' as const, gameId: 'one' })
 describe('isolated review session', () => {
+  it('tracks completed plies and stops a superseded batch from updating progress', async () => {
+    let progress!: ReviewProgress, finish!: (r: ReviewResponse) => void
+    const session = useReviewSession((_snapshot, report) => { progress = report!; return new Promise(resolve => { finish = resolve }) })
+    const pending = session.start(snapshot())
+    progress(0, 1)
+    expect(session.progress.value).toEqual({ completed: 0, total: 1 })
+    progress(1, 1)
+    expect(session.progress.value.completed).toBe(1)
+    session.invalidate()
+    expect(() => progress(1, 1)).toThrow('复盘已取消')
+    finish(result)
+    await pending
+    expect(session.result.value).toBeNull()
+  })
   it('replays and chats from the frozen pre-move position without touching live history', async () => {
     const live = snapshot()
     let payload: any

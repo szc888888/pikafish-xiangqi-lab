@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-os.environ["DATABASE_URL"] = "sqlite+pysqlite:///./test_email_auth.db"
 os.environ["AUTH_MODE"] = "email"
 
 from app.main import app  # noqa: E402

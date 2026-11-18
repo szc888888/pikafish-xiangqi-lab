@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { coachChat, review, type CoachMessage, type ReviewItem, type ReviewResponse } from './api'
+import { coachChat, review, type CoachMessage, type ReviewItem, type ReviewResponse, type ReviewProgress } from './api'
 import { applyMove, fromUci, parseFen } from './xiangqi'
 import { createRequestSequence } from './requestSequence'
 import { keyMoments, momentExplanation, type ReviewSide } from './reviewSummary'
@@ -12,12 +12,13 @@ function cloneSnapshot(source: ReviewSnapshot): ReviewSnapshot {
 }
 
 export function useReviewSession(
-  analyze: (snapshot: ReviewSnapshot) => Promise<ReviewResponse> = snapshot => review({ fen: snapshot.fen, moves: snapshot.moves, depth: 8, movetime_ms: 350, threads: 1, hash_mb: 128 }),
+  analyze: (snapshot: ReviewSnapshot, progress?: ReviewProgress, refresh?: boolean) => Promise<ReviewResponse> = (snapshot, progress) => review({ fen: snapshot.fen, moves: snapshot.moves, depth: 8, movetime_ms: 350, threads: 1, hash_mb: 128 }, progress),
   chat: typeof coachChat = coachChat,
 ) {
   const snapshot = ref<ReviewSnapshot | null>(null)
   const result = ref<ReviewResponse | null>(null)
   const busy = ref(false), error = ref(''), selected = ref<ReviewItem | null>(null)
+  const progress = ref({ completed: 0, total: 0 })
   const messages = ref<CoachMessage[]>([]), chatBusy = ref(false), chatError = ref('')
   const requests = createRequestSequence(), chats = createRequestSequence()
   const moments = computed(() => keyMoments(result.value?.items ?? [], snapshot.value?.side ?? 'watch'))
@@ -36,16 +37,22 @@ export function useReviewSession(
     requests.invalidate()
     snapshot.value = cloneSnapshot(source)
     result.value = response; busy.value = false; error.value = ''
+    progress.value = { completed: response.analyzed_plies, total: source.moves.length }
     select(moments.value[0] ?? null)
   }
-  async function start(source: ReviewSnapshot): Promise<ReviewResponse | null> {
+  async function start(source: ReviewSnapshot, refresh = false): Promise<ReviewResponse | null> {
     const request = requests.next()
     snapshot.value = cloneSnapshot(source)
     result.value = null; busy.value = true; error.value = ''; select(null)
+    progress.value = { completed: 0, total: source.moves.length }
     const captured = snapshot.value!
     try {
-      const response = await analyze(captured)
+      const response = await analyze(captured, (completed, total) => {
+        if (!requests.isCurrent(request)) throw new Error('复盘已取消')
+        progress.value = { completed, total }
+      }, refresh)
       if (!requests.isCurrent(request)) return null
+      if (response.game_id) snapshot.value!.gameId = response.game_id
       result.value = response
       select(moments.value[0] ?? null)
       return response
@@ -68,6 +75,6 @@ export function useReviewSession(
     finally { if (chats.isCurrent(request)) chatBusy.value = false }
   }
   function invalidate() { requests.invalidate(); chats.invalidate(); busy.value = false; chatBusy.value = false }
-  return { snapshot, result, busy, error, selected, messages, chatBusy, chatError, moments, board, start, restore, select, ask, invalidate,
+  return { snapshot, result, busy, progress, error, selected, messages, chatBusy, chatError, moments, board, start, restore, select, ask, invalidate,
     isStale: (live: ReviewSnapshot) => snapshot.value !== null && reviewSnapshotKey(snapshot.value) !== reviewSnapshotKey(live) }
 }

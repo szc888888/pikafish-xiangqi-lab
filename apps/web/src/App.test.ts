@@ -16,9 +16,15 @@ vi.mock('./lib/api', async importOriginal => ({
   createHallGame: vi.fn(),
   importGame: vi.fn(),
   getGame: vi.fn(),
+  getGameStats: vi.fn().mockResolvedValue({ total: 0, wins: 0, losses: 0, draws: 0, red_wins: 0, black_wins: 0 }),
+  deleteGame: vi.fn(),
+  resignHallGame: vi.fn(),
+  recommendMatch: vi.fn(),
+  randomMatch: vi.fn(),
   submitHallTurn: vi.fn(),
   engineMove: vi.fn(() => new Promise(() => {})),
   review: vi.fn().mockResolvedValue({ items: [], analyzed_plies: 0, final_score: null }),
+  persistReview: vi.fn(),
 }))
 
 // Mount the real App setup without a browser or child component rendering.
@@ -35,6 +41,7 @@ async function mountApp() {
   const proxy = app.mount({})
   unmount = () => app.unmount()
   await vi.waitFor(() => expect(api.getHealth).toHaveBeenCalled())
+  await vi.waitFor(() => expect(api.getMe).toHaveBeenCalledTimes(2))
   await nextTick()
   return (proxy.$ as unknown as { setupState: Record<string, any> }).setupState
 }
@@ -47,6 +54,7 @@ async function forwardButton(state: Record<string, any>) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(api.getGameStats).mockReset().mockResolvedValue({ total: 0, wins: 0, losses: 0, draws: 0, red_wins: 0, black_wins: 0 })
   const storage = new Map<string, string>()
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -55,6 +63,151 @@ beforeEach(() => {
   vi.stubGlobal('window', { location: { hash: '' }, setInterval: () => 1, clearInterval() {} })
 })
 afterEach(() => { unmount?.(); unmount = undefined; vi.unstubAllGlobals() })
+
+describe('public homepage', () => {
+  it('opens the hall without a board or technical service panel', async () => {
+    const state = await mountApp()
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(state.tab).toBe('hall')
+    expect(html).toContain('放心下')
+    expect(html).toContain('无限提示')
+    expect(html).not.toContain('class="board-column"')
+    expect(html).not.toContain('API 后端')
+    expect(html).not.toContain('重启引擎')
+  })
+
+  it('starts unlimited practice for a signed-in user and preserves the previous formal game', async () => {
+    const state = await mountApp()
+    const old = { ...state.createGameRecord('formal-old', '2026-11-15', '2026-11-15'), mode: 'ai_hall', status: 'active', serverVersion: 2 }
+    state.savedGames = [old]
+    state.currentGameId = old.id
+    state.hallMode = true
+    state.hallCloud = true
+    state.currentUser = { id: 'user-1', status: 'active', privacy_accepted: true }
+    state.side = 'black'
+    state.startPractice('beginner')
+    await nextTick()
+    expect(state.tab).toBe('duel')
+    expect(state.hallMode).toBe(false)
+    expect(state.hallCloud).toBe(false)
+    expect(state.side).toBe('red')
+    expect(state.difficulty).toBe('beginner')
+    expect(state.currentGameId).toBeNull()
+    expect(state.canRequestHint).toBe(true)
+    expect(state.savedGames[0]).toEqual(old)
+    expect(api.createHallGame).not.toHaveBeenCalled()
+    expect(api.engineMove).not.toHaveBeenCalled()
+    state.history = ['a3a4', 'a6a5']
+    expect(state.canUndo).toBe(true)
+    state.hintUsed = 999
+    expect(state.canRequestHint).toBe(true)
+  })
+
+  it('does not abandon an in-flight hall request to start practice', async () => {
+    const state = await mountApp()
+    state.hallBusy = true
+    state.hallMode = true
+    state.startPractice('beginner')
+    expect(state.hallMode).toBe(true)
+    expect(state.tab).toBe('hall')
+  })
+})
+
+describe('long review entry', () => {
+  it('saves a previously local review after consent becomes valid without requiring a new snapshot', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    const game = { ...state.createGameRecord('consent-long', '2026-11-16', '2026-11-16'), moves, serverVersion: 132, syncedMoves: 132 }
+    state.savedGames = [game]
+    state.history = moves
+    state.currentGameId = game.id
+    state.quickReview.restore(state.currentReviewSnapshot, { items: [], analyzed_plies: 132, final_score: null })
+    state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
+    vi.mocked(api.persistReview).mockResolvedValueOnce({ items: [], analyzed_plies: 132, final_score: null, review_id: 'consent-saved', game_id: game.id })
+    state.openReview()
+    await vi.waitFor(() => expect(state.quickReview.result.value?.review_id).toBe('consent-saved'))
+  })
+  it('uses cloud persistence for an owned long game and explicitly regenerates on request', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
+    const game = { ...state.createGameRecord('owned-long', '2026-11-16', '2026-11-16'), moves, serverVersion: 132, syncedMoves: 132 }
+    state.savedGames = [game]
+    vi.mocked(api.persistReview).mockResolvedValue({ items: [], analyzed_plies: 132, final_score: null, review_id: 'cloud-review', game_id: game.id })
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.result.value?.review_id).toBe('cloud-review'))
+    expect(api.persistReview).toHaveBeenLastCalledWith(game.id, expect.objectContaining({ moves }), expect.any(Function), false)
+    expect(api.review).not.toHaveBeenCalled()
+    await state.startQuickReview(true)
+    expect(api.persistReview).toHaveBeenLastCalledWith(game.id, expect.any(Object), expect.any(Function), true)
+  })
+  it('uploads a consenting user’s local practice through the existing import flow before saving its review', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
+    const game = { ...state.createGameRecord('local-long', '2026-11-16', '2026-11-16'), moves }
+    const remote = { id: 'uploaded-long', version: 132, moves: moves.map(uci => ({ uci })), events: [] }
+    state.savedGames = [game]
+    vi.mocked(api.importGame).mockResolvedValue(remote as any)
+    vi.mocked(api.getGame).mockResolvedValue(remote as any)
+    vi.mocked(api.persistReview).mockResolvedValue({ items: [], analyzed_plies: 132, final_score: null, review_id: 'uploaded-review', game_id: remote.id })
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.result.value?.review_id).toBe('uploaded-review'))
+    expect(api.importGame).toHaveBeenCalledWith(expect.objectContaining({ legacy_id: 'local-long', moves }))
+    expect(state.currentGameId).toBe(remote.id)
+    expect(state.quickReview.snapshot.value.gameId).toBe(remote.id)
+    expect(state.savedGames[0].reviewCache?.result.review_id).toBe('uploaded-review')
+    expect(api.review).not.toHaveBeenCalled()
+  })
+  it('keeps cloud save failures visible and retries the same stored progress', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
+    const game = { ...state.createGameRecord('retry-long', '2026-11-16', '2026-11-16'), moves, serverVersion: 132, syncedMoves: 132 }
+    state.savedGames = [game]
+    vi.mocked(api.persistReview).mockRejectedValueOnce(new Error('云端保存失败'))
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.error.value).toBe('云端保存失败'))
+    expect(api.review).not.toHaveBeenCalled()
+    expect(state.quickReview.result.value).toBeNull()
+    vi.mocked(api.persistReview).mockResolvedValueOnce({ items: [], analyzed_plies: 132, final_score: null, review_id: 'retried', game_id: game.id })
+    await state.startQuickReview(true)
+    expect(api.persistReview).toHaveBeenLastCalledWith(game.id, expect.any(Object), expect.any(Function), false)
+  })
+  it('opens and caches a long game review with progress without changing the live game', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    const game = { ...state.createGameRecord('long-game', '2026-11-16', '2026-11-16'), moves }
+    state.savedGames = [game]
+    vi.mocked(api.review).mockImplementationOnce(async (payload, progress) => {
+      expect(payload.moves).toEqual(moves)
+      progress?.(30, moves.length)
+      expect(state.quickReview.progress.value).toEqual({ completed: 30, total: 132 })
+      progress?.(132, 132)
+      return { items: [], final_score: null, analyzed_plies: 132, status: 'complete' }
+    })
+    state.useSavedGame(game)
+    const positionBefore = toFen(state.position)
+    expect(state.quickReviewReason).toBe('')
+    state.openReview()
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    expect(state.reviewDialogOpen).toBe(true)
+    expect(state.quickReview.result.value?.analyzed_plies).toBe(132)
+    expect(state.savedGames[0].reviewCache?.result.analyzed_plies).toBe(132)
+    expect(toFen(state.position)).toBe(positionBefore)
+    expect(state.history).toEqual(moves)
+  })
+  it('also caches completed long reviews from the full review tab', async () => {
+    const state = await mountApp()
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
+    state.history = moves
+    state.currentGameId = 'long-tab'
+    state.savedGames = [state.createGameRecord('long-tab', '2026-11-16', '2026-11-16')]
+    vi.mocked(api.review).mockResolvedValueOnce({ items: [], analyzed_plies: 132, final_score: null, status: 'complete' })
+    await state.runReview()
+    expect(state.savedGames[0].reviewCache?.result.analyzed_plies).toBe(132)
+  })
+})
 
 describe('saved game navigation', () => {
   it('uploads one local game with its events and replaces its local identity only after verification', async () => {
@@ -233,4 +386,129 @@ describe('duel new game', () => {
     expect(state.hallTurnId).toBe('turn-1')
     expect(api.engineMove).not.toHaveBeenCalled()
   })
+})
+
+
+describe('formal hall result lifecycle', () => {
+  it('preserves a cloud game and its stats when deletion fails, then refreshes after success', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('cloud-finished', '2026-11-15', '2026-11-15'), mode: 'ai_hall', status: 'finished', result: 'red_win', serverVersion: 4 }
+    state.savedGames = [game]
+    state.currentGameId = game.id
+    vi.mocked(api.getGameStats).mockResolvedValue({ total: 1, wins: 1, losses: 0, draws: 0, red_wins: 1, black_wins: 0 })
+    state.currentUser = { id: 'alice', status: 'active', privacy_accepted: true }
+    await vi.waitFor(() => expect(state.gameStats.data.value?.total).toBe(1))
+    vi.mocked(api.deleteGame).mockRejectedValueOnce(new Error('删除失败'))
+    await state.removeGame(game)
+    expect(state.savedGames).toHaveLength(1)
+    expect(state.currentGameId).toBe('cloud-finished')
+    expect(state.message).toBe('删除失败')
+    expect(state.gameStats.data.value?.total).toBe(1)
+    vi.mocked(api.getGameStats).mockResolvedValue({ total: 0, wins: 0, losses: 0, draws: 0, red_wins: 0, black_wins: 0 })
+    vi.mocked(api.deleteGame).mockResolvedValueOnce(undefined)
+    await state.removeGame(game)
+    expect(state.savedGames).toHaveLength(0)
+    expect(state.currentGameId).toBeNull()
+    await vi.waitFor(() => expect(state.gameStats.data.value?.total).toBe(0))
+  })
+  it('persists cloud resignation details and refreshes formal stats', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('cloud-active', '2026-11-15', '2026-11-15'), mode: 'ai_hall', status: 'active', serverVersion: 0 }
+    state.savedGames = [game]; state.currentGameId = game.id
+    state.hallCloud = true; state.hallMode = true
+    state.currentUser = { id: 'alice', status: 'active', privacy_accepted: true }
+    await nextTick()
+    vi.mocked(api.resignHallGame).mockResolvedValueOnce({ status: 'finished', result: 'black_win', termination_reason: 'resignation', version: 1 } as any)
+    vi.mocked(api.getGameStats).mockResolvedValue({ total: 1, wins: 0, losses: 1, draws: 0, red_wins: 0, black_wins: 1 })
+    await state.resignHall()
+    expect(state.hallResult).toBe('black_win')
+    expect(state.hallEndReason).toBe('resignation')
+    expect(JSON.parse(localStorage.getItem('pikafish-lab-games-v1')!)[0]).toMatchObject({ status: 'finished', result: 'black_win', terminationReason: 'resignation' })
+    await vi.waitFor(() => expect(state.gameStats.data.value?.losses).toBe(1))
+  })
+})
+
+describe('recoverable hall turns', () => {
+  it('blocks board edits, undo and redo while a pending hall turn needs recovery', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('pending', '2026-11-15', '2026-11-15'), mode: 'ai_hall', moves: ['a3a4', 'a6a5'], status: 'awaiting_ai' }
+    state.savedGames = [game]; state.useSavedGame(game)
+    state.hallTurnId = 'same-turn'; state.hallTurnMove = 'a3a4'
+    state.status = 'error'; state.futureMoves = ['c3c4']
+    expect(state.canHumanMove).toBe(false)
+    expect(state.canUndo).toBe(false)
+    expect(state.canRedo).toBe(false)
+    await state.undo()
+    expect(state.history).toEqual(['a3a4', 'a6a5'])
+  })
+  it('keeps a resigned local board closed even if pieces still have legal moves', async () => {
+    const state = await mountApp()
+    state.hallMode = true; state.hallResult = 'black_win'
+    expect(state.canHumanMove).toBe(false)
+    state.clickSquare(6, 0); state.clickSquare(5, 0)
+    expect(state.history).toEqual([])
+  })
+  it('returns a local pending game to active after a successful retry without replaying the user move', async () => {
+    const state = await mountApp()
+    const friend = { bot_id: 'north-star', name: '北斗', strength_profile: 'progress' }
+    const game = { ...state.createGameRecord('guest-pending', '2026-11-15', '2026-11-15'), mode: 'ai_hall', opponentSnapshot: friend, moves: ['a3a4'], status: 'awaiting_ai', pendingTurnId: 'local-turn', pendingUserUci: 'a3a4' }
+    state.savedGames = [game]; state.useSavedGame(game)
+    state.health = { engine_ready: true }
+    vi.mocked(api.engineMove).mockResolvedValueOnce({ bestmove: 'a6a5', lines: [] } as any)
+    await state.playHallMove('a3a4')
+    expect(state.history).toEqual(['a3a4', 'a6a5'])
+    expect(state.savedGames[0].status).toBe('active')
+    expect(state.savedGames[0].pendingTurnId).toBeNull()
+    expect(state.hallTurnId).toBeNull()
+  })
+  it('restores a cloud pending turn with its original id and version', async () => {
+    const state = await mountApp()
+    const friend = { bot_id: 'north-star', name: '北斗', strength_profile: 'progress' }
+    const game = { ...state.createGameRecord('cloud-pending', '2026-11-15', '2026-11-15'), mode: 'ai_hall', opponentSnapshot: friend, moves: ['a3a4'], status: 'awaiting_ai', serverVersion: 1, pendingTurnId: 'original-turn', pendingUserUci: 'a3a4', pendingExpectedVersion: 0 }
+    state.savedGames = [game]
+    vi.mocked(api.submitHallTurn).mockResolvedValueOnce({ game: { moves: [{ uci: 'a3a4' }, { uci: 'a6a5' }], status: 'active', version: 2, updated_at: '2026-11-15', result: null }, ai_move: null } as any)
+    state.restoreMostRecentHall()
+    await vi.waitFor(() => expect(state.history).toEqual(['a3a4', 'a6a5']))
+    expect(api.submitHallTurn).toHaveBeenCalledWith('cloud-pending', { turn_id: 'original-turn', expected_version: 0, user_uci: 'a3a4' })
+    expect(state.savedGames[0].status).toBe('active')
+    expect(state.hallTurnId).toBeNull()
+  })
+})
+
+it('starts a recommended black cloud game through one hall opening turn only', async () => {
+  const state = await mountApp()
+  const friend = { bot_id: 'north-star', name: '北斗', strength_profile: 'progress' }
+  const remote = { id: 'black-game', version: 0, initial_fen: START_FEN, moves: [], events: [], created_at: '2026-11-15', updated_at: '2026-11-15', user_side: 'black', mode: 'ai_hall', status: 'active', opponent_snapshot: friend }
+  state.currentUser = { id: 'alice', status: 'active', privacy_accepted: true }
+  vi.mocked(api.recommendMatch).mockResolvedValueOnce({ opponent: friend } as any)
+  vi.mocked(api.createHallGame).mockResolvedValueOnce(remote as any)
+  vi.mocked(api.submitHallTurn).mockResolvedValueOnce({ game: { ...remote, version: 1, moves: [{ uci: 'a3a4' }] }, ai_move: null } as any)
+  await state.matchHall('recommend', 'practice', 'black')
+  expect(api.createHallGame).toHaveBeenCalledWith({ opponent_id: 'north-star', user_side: 'black' })
+  expect(api.submitHallTurn).toHaveBeenCalledTimes(1)
+  expect(api.engineMove).not.toHaveBeenCalled()
+  expect(state.history).toEqual(['a3a4'])
+  expect(state.canHumanMove).toBe(true)
+  expect(state.canUndo).toBe(false)
+})
+
+it('offers pending-turn recovery on a manually loaded game even without a previous error', async () => {
+  const state = await mountApp()
+  const game = { ...state.createGameRecord('older-pending', '2026-11-14', '2026-11-14'), mode: 'ai_hall', moves: ['a3a4'], status: 'awaiting_ai', pendingTurnId: 'older-turn', pendingUserUci: 'a3a4' }
+  state.savedGames = [game]; state.useSavedGame(game)
+  expect(state.hallError).toBe('')
+  const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+  expect(html).toContain('重试当前回合')
+})
+
+it.each(['fen', 'setup'])('starts independent play from %s after a resigned hall game', async source => {
+  const state = await mountApp()
+  state.hallMode = true; state.hallCloud = true; state.hallResult = 'black_win'
+  state.hallTurnId = 'old-turn'; state.hallOpponent = { name: '旧棋友' }
+  if (source === 'fen') { state.fenInput = START_FEN; state.loadFen() }
+  else { state.startSetup(); state.finishSetup() }
+  expect(state.hallMode).toBe(false)
+  expect(state.hallResult).toBeNull()
+  expect(state.hallTurnId).toBeNull()
+  expect(state.canHumanMove).toBe(true)
 })

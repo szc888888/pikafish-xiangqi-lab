@@ -7,7 +7,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-os.environ["DATABASE_URL"] = "sqlite+pysqlite:///./test_persistence.db"
 os.environ["AUTH_MODE"] = "dev"
 
 from app.main import app  # noqa: E402
