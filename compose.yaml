@@ -44,7 +44,7 @@ services:
       VITE_HOST: 0.0.0.0
       API_PROXY_TARGET: http://api:8000
     ports:
-      - "127.0.0.1:1240:1239"
+      - "0.0.0.0:1240:1239"
     volumes:
       - ./apps/web:/workspace/apps/web
       - web_node_modules:/workspace/apps/web/node_modules

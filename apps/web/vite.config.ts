@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     host: process.env.VITE_HOST || '127.0.0.1',
     port: 1239,
+    allowedHosts: ['1237092oabk53.vicp.fun'],
     proxy: {
       '/api': process.env.API_PROXY_TARGET || 'http://127.0.0.1:8000',
       '/auth': process.env.API_PROXY_TARGET || 'http://127.0.0.1:8000',
