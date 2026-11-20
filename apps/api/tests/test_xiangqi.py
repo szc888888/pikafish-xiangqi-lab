@@ -57,6 +57,26 @@ def test_threefold_repetition_is_separate_from_perpetual_check():
     assert perpetual_check_side(repeated) is None
 
 
+def test_long_quiet_history_reuses_check_results(monkeypatch):
+    import app.xiangqi as rules
+
+    original = rules.is_in_check
+    calls = 0
+
+    def counted_check(position, red):
+        nonlocal calls
+        calls += 1
+        return original(position, red)
+
+    monkeypatch.setattr(rules, "is_in_check", counted_check)
+    moves = ["d0d1", "e9e8", "d1d0", "e8e9"] * 30
+    history = validate_history("4k4/9/9/9/4p4/9/9/9/9/3K5 w - - 0 1", moves)
+
+    assert history.issue is None
+    assert len(history.positions) == len(moves) + 1
+    assert calls < 2_000
+
+
 def test_pawn_move_is_valid():
     valid, error, index = validate_moves(START_FEN, ["a3a4"])
     assert valid is True

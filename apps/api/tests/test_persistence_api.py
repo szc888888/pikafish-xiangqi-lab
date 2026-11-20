@@ -61,6 +61,30 @@ def test_game_events_are_saved_and_read_back_without_changing_move_version():
         assert client.get(f"/api/games/{game['id']}", headers=headers).json()["events"] == [event]
 
 
+def test_game_listing_defers_event_replay_to_single_game_reads(monkeypatch):
+    import app.main as main_module
+
+    with TestClient(app) as client:
+        headers = {"X-Dev-User": "listing-event-user"}
+        game = client.post("/api/games", headers=headers, json={"initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"}).json()
+        calls = []
+        original = main_module._validate_game_events
+
+        def record_validation(initial_fen, events):
+            calls.append((initial_fen, events))
+            return original(initial_fen, events)
+
+        monkeypatch.setattr(main_module, "_validate_game_events", record_validation)
+        listing = client.get("/api/games", headers=headers)
+        assert listing.status_code == 200
+        assert [item["id"] for item in listing.json()] == [game["id"]]
+        assert calls == []
+
+        detail = client.get(f"/api/games/{game['id']}", headers=headers)
+        assert detail.status_code == 200
+        assert len(calls) == 1
+
+
 def test_game_events_reject_snapshots_that_do_not_match_validated_history():
     with TestClient(app) as client:
         headers = {"X-Dev-User": "invalid-event-user"}
