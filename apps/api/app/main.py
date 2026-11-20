@@ -199,6 +199,8 @@ def _position_to_fen(position: Position) -> str:
 
 
 def _same_position_as_fen(position: Position, fen: str) -> bool:
+    if fen == _position_to_fen(position):
+        return True
     try:
         cached = validate_fen(fen)
     except ValueError:
@@ -206,7 +208,7 @@ def _same_position_as_fen(position: Position, fen: str) -> bool:
     return cached.board == position.board and cached.red_to_move == position.red_to_move
 
 
-def _validate_game_projection(game: Game, history) -> None:
+def _validate_game_projection(game: Game, history, *, validate_events: bool = True) -> None:
     if history.issue:
         raise _api_error(409, "game_history_invalid", f"已保存棋谱第 {history.issue.ply} 步无效: {history.issue.message}")
     if len(history.positions) != len(game.moves) + 1:
@@ -228,7 +230,8 @@ def _validate_game_projection(game: Game, history) -> None:
     awaiting_ai = game.status == "awaiting_ai" and expected_status == "active" and any(turn.status == "ai_pending" for turn in game.turns)
     if not _same_position_as_fen(final, game.current_fen) or final.red_to_move != game.red_to_move or (game.status != expected_status and not awaiting_ai):
         raise _api_error(409, "game_projection_mismatch", "当前局面与规则重放结果不一致，请修复或重新导入棋局")
-    _validate_game_events(game.initial_fen, game.events or [])
+    if validate_events:
+        _validate_game_events(game.initial_fen, game.events or [])
 
 
 def _validate_game_events(initial_fen: str, events: list[dict]) -> None:
@@ -506,7 +509,7 @@ async def random_match(payload: RandomMatchRequest) -> MatchResponse:
 def list_games(user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> list[GameResponse]:
     games = db.scalars(select(Game).options(selectinload(Game.moves)).where(Game.user_id == user.id, Game.deleted_at.is_(None)).order_by(Game.updated_at.desc())).all()
     for game in games:
-        _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]))
+        _validate_game_projection(game, validate_history(game.initial_fen, [move.uci for move in game.moves]), validate_events=False)
     return [_game_response(game) for game in games]
 
 

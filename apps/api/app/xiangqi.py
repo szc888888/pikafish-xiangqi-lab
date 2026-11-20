@@ -237,10 +237,22 @@ def _material_key(position: Position) -> str:
     return "".join(sorted(piece for row in position.board for piece in row if piece != "."))
 
 
-def perpetual_check_side(positions: list[Position], moves: list[str] | None = None) -> str | None:
+def perpetual_check_side(
+    positions: list[Position], moves: list[str] | None = None,
+    *, check_cache: dict[tuple[int, bool], bool] | None = None,
+) -> str | None:
     """Return the side giving continuous checks through a threefold cycle."""
     if len(positions) < 3:
         return None
+
+    def is_checked(position: Position, red: bool) -> bool:
+        if check_cache is None:
+            return is_in_check(position, red)
+        key = (id(position), red)
+        if key not in check_cache:
+            check_cache[key] = is_in_check(position, red)
+        return check_cache[key]
+
     occurrences: dict[str, list[int]] = {}
     for index, position in enumerate(positions):
         occurrences.setdefault(_repetition_key(position), []).append(index)
@@ -256,7 +268,7 @@ def perpetual_check_side(positions: list[Position], moves: list[str] | None = No
                     mover = "red" if positions[index].red_to_move else "black"
                     if mover == side:
                         checked = True
-                        if not is_in_check(positions[index + 1], side != "red"):
+                        if not is_checked(positions[index + 1], side != "red"):
                             valid = False
                 if not checked:
                     valid = False
@@ -271,7 +283,7 @@ def perpetual_check_side(positions: list[Position], moves: list[str] | None = No
                 mover = "red" if positions[index].red_to_move else "black"
                 if mover != side:
                     continue
-                if not is_in_check(positions[index + 1], side != "red"):
+                if not is_checked(positions[index + 1], side != "red"):
                     checks.clear()
                     continue
                 checks.append((index, moves[index]))
@@ -299,32 +311,29 @@ def _attacks_piece(position: Position, source: tuple[int, int], target: tuple[in
 def perpetual_chase_side(positions: list[Position], moves: list[str] | None = None) -> str | None:
     """Return the side making three consecutive attacks on one moving enemy piece."""
     moves = moves or []
-    if len(moves) != len(positions) - 1 or len(moves) < 5:
+    if len(moves) != len(positions) - 1 or len(moves) < 7:
         return None
-    for side in ("red", "black"):
-        attacks: list[tuple[int, tuple[int, int], tuple[int, int]]] = []
-        for index in range(len(moves) - 2):
-            mover = "red" if positions[index].red_to_move else "black"
-            first, reply, follow = (_move_squares(moves[index]), _move_squares(moves[index + 1]), _move_squares(moves[index + 2]))
-            if mover != side or not first or not reply or not follow or follow[0] != first[1]:
-                continue
-            if not _attacks_piece(positions[index + 1], first[1], reply[0]) or not _attacks_piece(positions[index + 3], follow[1], reply[1]):
-                continue
+    side = "red" if positions[-4].red_to_move else "black"
+    attacks: list[tuple[int, tuple[int, int], tuple[int, int]]] = []
+    for index in range(len(moves) - 7, len(moves) - 2):
+        mover = "red" if positions[index].red_to_move else "black"
+        if mover != side:
+            continue
+        first, reply, follow = (_move_squares(moves[index]), _move_squares(moves[index + 1]), _move_squares(moves[index + 2]))
+        if not first or not reply or not follow or follow[0] != first[1]:
+            continue
+        if _attacks_piece(positions[index + 1], first[1], reply[0]) and _attacks_piece(positions[index + 3], follow[1], reply[1]):
             attacks.append((index, reply[0], reply[1]))
-        for start in range(len(attacks)):
-            count = 1
-            for next_index in range(start + 1, len(attacks)):
-                previous, current = attacks[next_index - 1], attacks[next_index]
-                if current[0] != previous[0] + 2 or current[1] != previous[2]:
-                    break
-                count += 1
-                if count >= 3 and current[0] + 2 == len(moves) - 1:
-                    return side
-    return None
+    if [attack[0] for attack in attacks] != [len(moves) - 7, len(moves) - 5, len(moves) - 3]:
+        return None
+    return side if attacks[1][1] == attacks[0][2] and attacks[2][1] == attacks[1][2] else None
 
 
-def perpetual_rule_violation(positions: list[Position], moves: list[str] | None = None) -> tuple[str, str] | None:
-    if (side := perpetual_check_side(positions, moves)):
+def perpetual_rule_violation(
+    positions: list[Position], moves: list[str] | None = None,
+    *, check_cache: dict[tuple[int, bool], bool] | None = None,
+) -> tuple[str, str] | None:
+    if (side := perpetual_check_side(positions, moves, check_cache=check_cache)):
         return side, "长将"
     if (side := perpetual_chase_side(positions, moves)):
         return side, "长捉"
@@ -346,6 +355,7 @@ def validate_history(fen: str, moves: list[str]) -> HistoryValidation:
     """Validate a complete history and retain snapshots through the first issue."""
     position = validate_fen(fen)
     positions = [_copy_position(position)]
+    check_cache: dict[tuple[int, bool], bool] = {}
     for index, move in enumerate(moves):
         side = "red" if position.red_to_move else "black"
         try:
@@ -356,7 +366,7 @@ def validate_history(fen: str, moves: list[str]) -> HistoryValidation:
                 issue=RuleIssue(code="invalid_move", message=str(exc), ply=index + 1, side=side),
             )
         positions.append(_copy_position(position))
-        offender = perpetual_rule_violation(positions, moves[: index + 1])
+        offender = perpetual_rule_violation(positions, moves[: index + 1], check_cache=check_cache)
         if offender:
             return HistoryValidation(positions=positions, issue=_rule_issue(offender, index + 1))
     return HistoryValidation(positions=positions)
