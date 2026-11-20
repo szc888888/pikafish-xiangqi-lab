@@ -4,6 +4,8 @@ import { renderToString } from '@vue/server-renderer'
 import App from './App.vue'
 import * as api from './lib/api'
 import { START_FEN, toFen } from './lib/xiangqi'
+import { createHintEvent } from './lib/gameEvents'
+import { reviewSnapshotKey } from './lib/useReviewSession'
 
 vi.mock('./lib/api', async importOriginal => ({
   ...await importOriginal<typeof import('./lib/api')>(),
@@ -210,6 +212,74 @@ describe('long review entry', () => {
 })
 
 describe('saved game navigation', () => {
+  it('reuses a cached quick review when reopening the same saved game', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('chanju2', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'] }
+    state.savedGames = [game]
+    vi.mocked(api.review).mockResolvedValue({ items: [], analyzed_plies: 2, final_score: null, status: 'complete' })
+
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    expect(api.review).toHaveBeenCalledTimes(1)
+    expect(state.savedGames[0].reviewCache).toBeDefined()
+
+    state.useSavedGame(game)
+    await nextTick()
+    expect(api.review).toHaveBeenCalledTimes(1)
+    expect(state.quickReview.result.value?.analyzed_plies).toBe(2)
+  })
+
+  it('keeps the quick review cache when saved event records are merged', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('event-cache', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'], events: [] }
+    state.savedGames = [game]
+    vi.mocked(api.review).mockResolvedValue({ items: [], analyzed_plies: 2, final_score: null, status: 'complete' })
+
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    game.events = [createHintEvent(game.moves, toFen(state.position), [{ move: 'b2b3', label: '炮八进一', score: null }])]
+    state.useSavedGame(game)
+    await nextTick()
+    expect(api.review).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores a legacy cached summary after event changes without regenerating it', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('legacy-cache', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'], events: [] }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    game.reviewCache = {
+      snapshotKey: reviewSnapshotKey(state.currentReviewSnapshot),
+      result: { items: [], analyzed_plies: 2, final_score: null, status: 'complete' },
+      generatedAt: '2026-11-20T00:00:00Z',
+    }
+    game.events = [createHintEvent(game.moves, toFen(state.position), [{ move: 'b2b3', label: '炮八进一', score: null }])]
+    vi.mocked(api.review).mockClear()
+
+    state.useSavedGame(game)
+    await nextTick()
+    expect(api.review).not.toHaveBeenCalled()
+    expect(state.quickReview.result.value?.analyzed_plies).toBe(2)
+    expect(JSON.parse(game.reviewCache.snapshotKey)).toEqual([game.baseFen, game.moves, game.side])
+  })
+
+  it('restores a short review after the local game receives a cloud identity', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('guest-game', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'] }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    expect(api.review).toHaveBeenCalledTimes(1)
+
+    game.id = 'cloud-game'
+    game.serverVersion = 2
+    state.currentGameId = game.id
+    state.useSavedGame(game)
+    await nextTick()
+    expect(api.review).toHaveBeenCalledTimes(1)
+  })
+
   it('uploads one local game with its events and replaces its local identity only after verification', async () => {
     const state = await mountApp()
     const game = { ...state.createGameRecord('local-game', '2026-11-12', '2026-11-12'), moves: ['a3a4', 'a6a5'], events: [{ id: 'event-1' }] }

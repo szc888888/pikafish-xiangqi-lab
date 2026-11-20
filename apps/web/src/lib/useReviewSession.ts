@@ -7,6 +7,7 @@ import type { GameEvent } from './gameEvents'
 
 export interface ReviewSnapshot { fen: string; moves: string[]; side: ReviewSide; gameId: string | null; events?: GameEvent[] }
 export function reviewSnapshotKey(value: ReviewSnapshot): string { return JSON.stringify([value.gameId, value.fen, value.moves, value.side, value.events ?? []]) }
+export function reviewAnalysisKey(value: ReviewSnapshot): string { return JSON.stringify([value.fen, value.moves, value.side]) }
 function cloneSnapshot(source: ReviewSnapshot): ReviewSnapshot {
   return { ...source, moves: [...source.moves], events: source.events?.map(event => ({ ...event, positionMoves: [...event.positionMoves], ...(event.type === 'undo' ? { undoneMoves: [...event.undoneMoves] } : { candidates: event.candidates.map(candidate => ({ ...candidate, score: candidate.score ? { ...candidate.score } : null })) }) })) }
 }

@@ -30,7 +30,7 @@ import { createHintEvent, createUndoEvent, type GameEvent } from './lib/gameEven
 import { waitForMinimumElapsed } from './lib/minimumDelay'
 import { playMoveSteps } from './lib/movePlayback'
 import ReviewDialog from './components/ReviewDialog.vue'
-import { useReviewSession, reviewSnapshotKey, type ReviewSnapshot } from './lib/useReviewSession'
+import { useReviewSession, reviewAnalysisKey, reviewSnapshotKey, type ReviewSnapshot } from './lib/useReviewSession'
 import { reviewDisabledReason } from './lib/reviewSummary'
 import { terminalStatus } from './lib/xiangqi'
 
@@ -182,13 +182,17 @@ let lastAutomaticReview = ''
 function cachedReviewFor(snapshot:ReviewSnapshot){
   const game=savedGames.value.find(item=>item.id===snapshot.gameId)
   const cache=game?.reviewCache
-  if(currentUser.value?.privacy_accepted===true&&snapshot.moves.length>120&&!cache?.result.review_id)return undefined
-  return cache?.snapshotKey===reviewSnapshotKey(snapshot)?cache:undefined
+  if(!cache)return undefined
+  if(cache.snapshotKey===reviewAnalysisKey(snapshot)||cache.snapshotKey===reviewSnapshotKey(snapshot))return cache
+  try{
+    const legacy=JSON.parse(cache.snapshotKey)
+    return Array.isArray(legacy)&&legacy.length===5&&JSON.stringify(legacy.slice(1,4))===reviewAnalysisKey(snapshot)?cache:undefined
+  }catch{return undefined}
 }
 function saveQuickReview(snapshot:ReviewSnapshot,result:ReviewResponse){
   const game=savedGames.value.find(item=>item.id===snapshot.gameId)
   if(!game)return
-  game.reviewCache={snapshotKey:reviewSnapshotKey(snapshot),result,generatedAt:new Date().toISOString()}
+  game.reviewCache={snapshotKey:reviewAnalysisKey(snapshot),result,generatedAt:new Date().toISOString()}
   persistGames()
 }
 async function startQuickReview(force=false){
@@ -196,12 +200,20 @@ async function startQuickReview(force=false){
   const snapshot=currentReviewSnapshot.value
   if(!force){
     const cached=cachedReviewFor(snapshot)
-    if(cached){quickReview.restore(snapshot,cached.result);return}
+    const needsCloudSave=Boolean(cached&&currentUser.value?.privacy_accepted===true&&snapshot.moves.length>120&&!cached.result.review_id)
+    if(cached&&!needsCloudSave){
+      quickReview.restore(snapshot,cached.result)
+      if(cached.snapshotKey!==reviewAnalysisKey(snapshot)){
+        const game=savedGames.value.find(item=>item.id===snapshot.gameId)
+        if(game){game.reviewCache={...cached,snapshotKey:reviewAnalysisKey(snapshot)};persistGames()}
+      }
+      return
+    }
     if(!quickReviewStale.value&&((quickReview.result.value&&!reviewNeedsCloudSave.value)||quickReview.busy.value))return
   }
   const result=await quickReview.start(snapshot,force&&!quickReview.error.value)
   const storedSnapshot={...snapshot,gameId:result?.game_id??snapshot.gameId}
-  if(result&&reviewSnapshotKey(storedSnapshot)===reviewSnapshotKey(currentReviewSnapshot.value))saveQuickReview(storedSnapshot,result)
+  if(result&&reviewAnalysisKey(storedSnapshot)===reviewAnalysisKey(currentReviewSnapshot.value))saveQuickReview(storedSnapshot,result)
 }
 function openReview(retry=false){
   if(quickReviewReason.value)return
@@ -418,8 +430,8 @@ function openSaveGameDialog(){
 function cancelSaveGame(){saveNameDialogOpen.value=false;saveGameName.value='';saveNameError.value=''}
 function savePositionAsGame(name:string){
   const now=new Date().toISOString(),id=`${now}-${Math.random().toString(36).slice(2,8)}`
-  const record=createGameRecord(id,now,now,name);savedGames.value.unshift(record);currentGameId.value=id;if(record.reviewCache)record.reviewCache.snapshotKey=reviewSnapshotKey(currentReviewSnapshot.value);savedGames.value.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));persistGames();message.value=`棋局“${name}”已保存，可在“棋局”中继续或重开`
-  void createGame({name,initial_fen:baseFen.value,engine_settings:currentEngineSettings(),events:record.events as PersistedGameEvent[]}).then(remote=>{record.id=remote.id;record.serverVersion=remote.version;record.syncedMoves=0;record.syncedEvents=remote.events.length;currentGameId.value=remote.id;if(record.reviewCache)record.reviewCache.snapshotKey=reviewSnapshotKey(currentReviewSnapshot.value);persistGames();void syncCurrentGame(record)}).catch(()=>{})
+  const record=createGameRecord(id,now,now,name);savedGames.value.unshift(record);currentGameId.value=id;if(record.reviewCache)record.reviewCache.snapshotKey=reviewAnalysisKey(currentReviewSnapshot.value);savedGames.value.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));persistGames();message.value=`棋局“${name}”已保存，可在“棋局”中继续或重开`
+  void createGame({name,initial_fen:baseFen.value,engine_settings:currentEngineSettings(),events:record.events as PersistedGameEvent[]}).then(remote=>{record.id=remote.id;record.serverVersion=remote.version;record.syncedMoves=0;record.syncedEvents=remote.events.length;currentGameId.value=remote.id;if(record.reviewCache)record.reviewCache.snapshotKey=reviewAnalysisKey(currentReviewSnapshot.value);persistGames();void syncCurrentGame(record)}).catch(()=>{})
 }
 async function syncCurrentGame(game:SavedGame){
   if(!game.serverVersion&&game.serverVersion!==0)return
