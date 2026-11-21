@@ -18,6 +18,8 @@ vi.mock('./lib/api', async importOriginal => ({
   createHallGame: vi.fn(),
   importGame: vi.fn(),
   getGame: vi.fn(),
+  getGames: vi.fn().mockResolvedValue([]),
+  createGame: vi.fn().mockRejectedValue(new Error('guest')),
   getGameStats: vi.fn().mockResolvedValue({ total: 0, wins: 0, losses: 0, draws: 0, red_wins: 0, black_wins: 0 }),
   deleteGame: vi.fn(),
   resignHallGame: vi.fn(),
@@ -212,6 +214,120 @@ describe('long review entry', () => {
 })
 
 describe('saved game navigation', () => {
+  it('shows the loaded game name on the duel page and keeps it through undo and redo', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('named', '2026-11-21', '2026-11-21', '残局练习'), moves: ['a3a4', 'a6a5'] }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(html).toContain('aria-label="当前棋局">残局练习</p>')
+    await state.undo()
+    await state.redo()
+    expect(state.currentGameName).toBe('残局练习')
+    state.resetGame()
+    expect(state.currentGameName).toBe('自由练习')
+  })
+
+  it('continues an old watch-mode archive as the current side without changing its history', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('old-cloud', '2026-11-21', '2026-11-21'), side: 'watch', moves: ['a3a4'] }
+    state.savedGames = [game]
+    state.continueSavedGame(game)
+    expect(state.currentGameName).toBe('未命名棋局')
+    expect(state.side).toBe('black')
+    expect(state.canHumanMove).toBe(true)
+    expect(game.side).toBe('watch')
+    expect(state.history).toEqual(['a3a4'])
+    expect(api.engineMove).not.toHaveBeenCalled()
+    vi.mocked(api.engineMove).mockResolvedValueOnce({ bestmove: 'b0c2', lines: [] } as any)
+    state.clickSquare(3, 0)
+    state.clickSquare(4, 0)
+    expect(state.history).toEqual(['a3a4', 'a6a5'])
+    expect(api.engineMove).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(state.status).toBe('idle'), { timeout: 2500 })
+    expect(state.history).toEqual(['a3a4', 'a6a5', 'b0c2'])
+    expect(state.canHumanMove).toBe(true)
+  })
+
+  it('keeps a terminal archive closed when continuing it', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('finished-practice', '2026-11-21', '2026-11-21'),
+      side: 'red', baseFen: 'R3k4/9/4R4/9/9/4P4/9/9/9/4K4 b - - 0 1', moves: [] }
+    state.savedGames = [game]
+    state.continueSavedGame(game)
+    await nextTick()
+    expect(state.gameTerminal).toBe('checkmate')
+    expect(state.canHumanMove).toBe(false)
+    expect(api.engineMove).not.toHaveBeenCalled()
+  })
+
+  it('offers an explicit way to continue the current watch position', async () => {
+    const state = await mountApp()
+    state.tab = 'duel'
+    state.side = 'watch'
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(html).toContain('>继续对弈</button>')
+    state.resumePractice()
+    expect(state.side).toBe('red')
+    expect(state.canHumanMove).toBe(true)
+    expect(api.engineMove).not.toHaveBeenCalled()
+  })
+
+  it('requests the pending ordinary AI move once when opening a saved game', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('pending-practice', '2026-11-21', '2026-11-21'), moves: ['a3a4'] }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await nextTick()
+    expect(state.side).toBe('red')
+    expect(api.engineMove).toHaveBeenCalledTimes(1)
+    expect(api.engineMove).toHaveBeenCalledWith(expect.objectContaining({ moves: ['a3a4'], game_id: game.id }))
+    state.resumePractice()
+    expect(api.engineMove).toHaveBeenCalledTimes(1)
+  })
+
+  it('resumes a black player’s pending red opening without duplicate requests', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('black-opening', '2026-11-21', '2026-11-21'), side: 'black' }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await nextTick()
+    expect(api.engineMove).toHaveBeenCalledTimes(1)
+  })
+
+  it('can retry a failed pending ordinary AI turn', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('retry-practice', '2026-11-21', '2026-11-21'), moves: ['a3a4'] }
+    state.savedGames = [game]
+    vi.mocked(api.engineMove).mockRejectedValueOnce(new Error('引擎暂不可用'))
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.status).toBe('error'))
+    expect(state.history).toEqual(['a3a4'])
+    state.resumePractice()
+    expect(api.engineMove).toHaveBeenCalledTimes(2)
+    expect(api.engineMove).toHaveBeenLastCalledWith(expect.objectContaining({ moves: ['a3a4'], game_id: game.id }))
+  })
+
+  it('sends the selected side when saving a new named practice', async () => {
+    const state = await mountApp()
+    state.side = 'black'
+    state.savePositionAsGame('执黑练习')
+    expect(api.createGame).toHaveBeenCalledWith(expect.objectContaining({ name: '执黑练习', user_side: 'black' }))
+  })
+
+  it('keeps a known local side when an old cloud record has no user side', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('merge-side', '2026-11-21', '2026-11-21'), side: 'black', serverVersion: 0 }
+    state.savedGames = [game]
+    vi.mocked(api.getMe).mockResolvedValueOnce({ id: 'owner', status: 'active', privacy_accepted: true } as any)
+    vi.mocked(api.getGames).mockResolvedValueOnce([{
+      id: game.id, name: null, initial_fen: START_FEN, moves: [], events: [], version: 0,
+      created_at: game.startedAt, updated_at: game.updatedAt, user_side: null, engine_settings: game.difficultySettings,
+    }] as any)
+    await state.loadServerGames()
+    expect(state.savedGames[0].side).toBe('black')
+  })
+
   it('reuses a cached quick review when reopening the same saved game', async () => {
     const state = await mountApp()
     const game = { ...state.createGameRecord('chanju2', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'] }
@@ -537,7 +653,7 @@ describe('recoverable hall turns', () => {
     const game = { ...state.createGameRecord('cloud-pending', '2026-11-15', '2026-11-15'), mode: 'ai_hall', opponentSnapshot: friend, moves: ['a3a4'], status: 'awaiting_ai', serverVersion: 1, pendingTurnId: 'original-turn', pendingUserUci: 'a3a4', pendingExpectedVersion: 0 }
     state.savedGames = [game]
     vi.mocked(api.submitHallTurn).mockResolvedValueOnce({ game: { moves: [{ uci: 'a3a4' }, { uci: 'a6a5' }], status: 'active', version: 2, updated_at: '2026-11-15', result: null }, ai_move: null } as any)
-    state.restoreMostRecentHall()
+    state.continueSavedGame(game)
     await vi.waitFor(() => expect(state.history).toEqual(['a3a4', 'a6a5']))
     expect(api.submitHallTurn).toHaveBeenCalledWith('cloud-pending', { turn_id: 'original-turn', expected_version: 0, user_uci: 'a3a4' })
     expect(state.savedGames[0].status).toBe('active')

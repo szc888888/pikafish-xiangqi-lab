@@ -49,6 +49,39 @@ def test_game_and_moves_are_persisted_and_owned_by_dev_user():
         assert fetched.json()["moves"][0]["uci"] == "a3a4"
 
 
+@pytest.mark.parametrize("side", ["red", "black", None])
+def test_practice_save_restores_name_side_and_replayable_history(side):
+    with TestClient(app) as client:
+        headers = {"X-Dev-User": "practice-side"}
+        payload = {"name": "残局练习", "initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"}
+        if side is not None:
+            payload["user_side"] = side
+        created = client.post("/api/games", headers=headers, json=payload)
+        assert created.status_code == 201
+        game = created.json()
+        assert game["user_side"] == side
+        assert game["counts_for_stats"] is False
+        moved = client.post(f"/api/games/{game['id']}/moves", headers=headers, json={"expected_version": 0, "uci": "a3a4"})
+        assert moved.status_code == 201
+        fetched = client.get(f"/api/games/{game['id']}", headers=headers).json()
+        assert fetched["name"] == "残局练习"
+        assert fetched["user_side"] == side
+        assert fetched["moves"][0]["uci"] == "a3a4"
+        assert fetched["current_fen"] == moved.json()["current_fen"]
+        assert fetched["red_to_move"] is False
+        assert client.get("/api/games", headers=headers).json()[0]["user_side"] == side
+
+
+def test_practice_save_rejects_invalid_side():
+    with TestClient(app) as client:
+        response = client.post("/api/games", headers={"X-Dev-User": "bad-practice-side"}, json={
+            "initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+            "user_side": "watch",
+        })
+        assert response.status_code == 422
+        assert client.get("/api/games", headers={"X-Dev-User": "bad-practice-side"}).json() == []
+
+
 def test_game_events_are_saved_and_read_back_without_changing_move_version():
     with TestClient(app) as client:
         headers = {"X-Dev-User": "event-user"}

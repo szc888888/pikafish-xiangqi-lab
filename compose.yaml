@@ -12,7 +12,7 @@ services:
         cp /engine/pikafish /opt/pikafish/pikafish &&
         chmod 755 /opt/pikafish/pikafish &&
         cp /engine/pikafish.nnue /opt/pikafish/pikafish.nnue &&
-        exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+        exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
     env_file:
       - path: .env
         required: false

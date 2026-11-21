@@ -522,7 +522,7 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
     except ValueError as exc:
         raise _api_error(400, "invalid_fen", str(exc)) from exc
     _validate_game_events(payload.initial_fen.strip(), payload.events)
-    game = Game(user_id=user.id, name=payload.name, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(), events=payload.events)
+    game = Game(user_id=user.id, name=payload.name, user_side=payload.user_side, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(), events=payload.events)
     db.add(game)
     db.commit()
     db.refresh(game)

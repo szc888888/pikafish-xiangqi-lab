@@ -315,6 +315,7 @@ class SavedEngineSettings(BaseModel):
 
 
 class GameCreateRequest(BaseModel):
+    user_side: Literal["red", "black"] | None = None
     name: str | None = Field(default=None, max_length=120)
     initial_fen: str = Field(min_length=1, max_length=200)
     engine_settings: SavedEngineSettings = Field(default_factory=SavedEngineSettings)
