@@ -178,7 +178,7 @@ const quickReview = useReviewSession(analyzeReviewSnapshot)
 const quickReviewGameName = computed(()=>quickReview.snapshot.value?.gameId===currentGameId.value?currentGameName.value:savedGames.value.find(game=>game.id===quickReview.snapshot.value?.gameId)?.name?.trim() || '未命名棋局')
 const quickReviewReason = computed(()=>reviewDisabledReason({setup:setupMode.value,thinking:status.value==='thinking',engineReady:engineReady.value,plies:history.value.length}))
 const quickReviewStale = computed(()=>quickReview.isStale(currentReviewSnapshot.value))
-const reviewNeedsCloudSave = computed(()=>currentUser.value?.status==='active'&&currentUser.value.privacy_accepted===true&&history.value.length>120&&quickReview.result.value!==null&&!quickReview.result.value.review_id)
+const reviewNeedsCloudSave = computed(()=>currentUser.value?.status==='active'&&currentUser.value.privacy_accepted===true&&quickReview.result.value!==null&&!quickReview.result.value.review_id)
 const gameTerminal = computed(()=>setupMode.value?null:terminalStatus(position.value))
 let lastAutomaticReview = ''
 function cachedReviewFor(snapshot:ReviewSnapshot){
@@ -202,7 +202,7 @@ async function startQuickReview(force=false){
   const snapshot=currentReviewSnapshot.value
   if(!force){
     const cached=cachedReviewFor(snapshot)
-    const needsCloudSave=Boolean(cached&&currentUser.value?.privacy_accepted===true&&snapshot.moves.length>120&&!cached.result.review_id)
+    const needsCloudSave=Boolean(cached&&currentUser.value?.privacy_accepted===true&&!cached.result.review_id)
     if(cached&&!needsCloudSave){
       quickReview.restore(snapshot,cached.result)
       if(cached.snapshotKey!==reviewAnalysisKey(snapshot)){

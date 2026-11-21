@@ -15,8 +15,42 @@ def metadata(review: Review) -> dict:
     return review.parameters["_segmented"]
 
 
-def progress(review: Review) -> CloudReviewProgress:
-    meta = metadata(review)
+def _legacy_metadata(review: Review) -> dict | None:
+    """Recover completed reviews written by the original single-request API."""
+    history = validate_history(review.initial_fen_snapshot, review.moves_snapshot)
+    issue = history.issue
+    if issue and issue.code == "invalid_move":
+        return None
+    completed = issue.ply - 1 if issue else len(review.moves_snapshot)
+    items = sorted((item for item in review.items if not item.rule_stop_kind), key=lambda item: item.ply)
+    if [item.ply for item in items] != list(range(1, completed + 1)):
+        return None
+    if any(item.move != review.moves_snapshot[item.ply - 1] for item in items):
+        return None
+    stops = [item for item in review.items if item.rule_stop_kind]
+    stop = None
+    if issue:
+        if review.status != "stopped_rule_violation" or len(stops) != 1:
+            return None
+        row = stops[0]
+        if (row.ply, row.side, row.rule_stop_kind) != (issue.ply, issue.side, issue.code):
+            return None
+        stop = {"ply": row.ply, "side": row.side, "kind": row.rule_stop_kind,
+                "message": row.rule_stop_message or issue.message}
+    elif review.status != "complete" or stops:
+        return None
+    # Stored after_score is from the mover's perspective; final_score is from
+    # the next side to move. Keep unknown scores unknown, including mate scores.
+    final_score = None
+    if items and items[-1].after_score is not None:
+        score = Score.model_validate(items[-1].after_score)
+        final_score = score.model_copy(update={"value": -score.value}).model_dump()
+    return {"completed_plies": completed, "final_score": final_score, "stop": stop}
+
+
+def progress(review: Review, meta: dict | None = None) -> CloudReviewProgress:
+    if meta is None:
+        meta = metadata(review)
     result = None
     if review.status in {"complete", "stopped_rule_violation"}:
         history = validate_history(review.initial_fen_snapshot, review.moves_snapshot)
@@ -52,8 +86,13 @@ def start(db: Session, user: User, game: Game, request: CloudReviewRequest, engi
             Review.status.in_(["in_progress", "complete", "stopped_rule_violation"]),
         ).order_by(Review.created_at.desc())).all()
         for saved in existing:
-            if "_segmented" in saved.parameters and {k: v for k, v in saved.parameters.items() if k != "_segmented"} == parameters:
+            if {k: v for k, v in saved.parameters.items() if k != "_segmented"} != parameters:
+                continue
+            if "_segmented" in saved.parameters:
                 return progress(saved)
+            legacy = _legacy_metadata(saved)
+            if legacy is not None:
+                return progress(saved, legacy)
     saved = Review(
         game_id=game.id, user_id=user.id, game_version=game.version,
         initial_fen_snapshot=request.fen.strip(), moves_snapshot=list(request.moves), history_hash=snapshot_hash,

@@ -225,7 +225,9 @@ export async function review(payload: ReviewPayload, progress?: ReviewProgress):
 interface CloudReviewProgress { review_id: string; completed_plies: number; total_plies: number; status: 'in_progress' | 'complete' | 'stopped_rule_violation'; result: ReviewResponse | null }
 export async function persistReview(gameId: string, payload: ReviewPayload, progress?: ReviewProgress, refresh = false): Promise<ReviewResponse> {
   if (payload.moves.length > 400) throw new Error('棋谱超过当前支持的 400 个半回合')
-  if (payload.moves.length > 120) {
+  // Short games need the same persisted lookup/resume path as long games.
+  // Keep the original endpoint only for the supported empty-history API case.
+  if (payload.moves.length > 0) {
     const frozen = { ...payload, moves: [...payload.moves] }
     progress?.(0, frozen.moves.length)
     let state = await request<CloudReviewProgress>(`/api/games/${encodeURIComponent(gameId)}/reviews/segmented`, { method: 'POST', body: JSON.stringify({ ...frozen, reuse: !refresh }) })

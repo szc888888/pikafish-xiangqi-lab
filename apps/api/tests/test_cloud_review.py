@@ -57,6 +57,96 @@ def fake_search(monkeypatch, fail_prefix=None):
     return calls
 
 
+@pytest.mark.parametrize("plies", [1, 27, 120])
+def test_short_review_survives_a_fresh_client_without_reanalysis(monkeypatch, plies):
+    calls = fake_search(monkeypatch)
+    payload = {"fen": START_FEN, "moves": MOVES[:plies], "depth": 1, "movetime_ms": 1}
+    with TestClient(main.app) as client:
+        game = client.post("/api/games/import", headers=OWNER, json={
+            "legacy_id": "short-review", "initial_fen": START_FEN, "moves": MOVES[:plies],
+        }).json()
+        path = f"/api/games/{game['id']}/reviews/segmented"
+        state = client.post(path, headers=OWNER, json=payload).json()
+        while not state["result"]:
+            response = client.post(f"/api/reviews/{state['review_id']}/advance", headers=OWNER,
+                                   json={"start_ply": state["completed_plies"]})
+            assert response.status_code == 200, response.text
+            state = response.json()
+        assert state["result"]["analyzed_plies"] == plies
+        count = len(calls)
+
+    # No browser cache and a new API lifespan: the durable database is enough.
+    with TestClient(main.app) as client:
+        restored = client.post(path, headers=OWNER, json=payload)
+        assert restored.status_code == 200, restored.text
+        assert restored.json() == state
+        assert len(calls) == count
+        assert client.post(path, headers=OTHER, json=payload).status_code == 404
+        changed = client.post(path, headers=OWNER, json={**payload, "moves": MOVES[:plies - 1]})
+        assert changed.status_code in {409, 422}
+        forced = client.post(path, headers=OWNER, json={**payload, "reuse": False}).json()
+        assert forced["review_id"] != state["review_id"]
+        assert forced["completed_plies"] == 0
+        assert len(calls) == count
+
+
+@pytest.mark.parametrize("score", [Score(type="cp", value=73), Score(type="mate", value=-3), None])
+def test_legacy_short_review_is_loaded_from_the_database(monkeypatch, score):
+    calls = []
+
+    async def analyze(_fen, moves, *_args):
+        calls.append(list(moves))
+        return EngineResponse(bestmove="0000", score=score, pv=[])
+
+    monkeypatch.setattr(main.engine, "analyze", analyze)
+    payload = {"fen": START_FEN, "moves": MOVES[:27], "depth": 1, "movetime_ms": 1}
+    with TestClient(main.app) as client:
+        game = client.post("/api/games/import", headers=OWNER, json={
+            "legacy_id": "legacy-short", "initial_fen": START_FEN, "moves": MOVES[:27],
+        }).json()
+        original = client.post(f"/api/games/{game['id']}/reviews", headers=OWNER, json=payload)
+        assert original.status_code == 200, original.text
+        count = len(calls)
+        restored = client.post(f"/api/games/{game['id']}/reviews/segmented", headers=OWNER, json=payload)
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["result"] == original.json()
+        assert len(calls) == count
+        with SessionLocal() as db:
+            assert db.query(Review).count() == 1
+        # Incomplete old records must never masquerade as a completed summary.
+        with SessionLocal() as db:
+            db.delete(db.query(ReviewItem).filter_by(review_id=original.json()["review_id"], ply=2).one())
+            db.commit()
+        recovered = client.post(f"/api/games/{game['id']}/reviews/segmented", headers=OWNER, json=payload).json()
+        assert recovered["review_id"] != original.json()["review_id"]
+        assert recovered["status"] == "in_progress"
+
+
+def test_legacy_rule_stop_keeps_the_legal_prefix_and_stop_reason():
+    from app import cloud_review
+
+    fen = "4k4/9/9/9/R1r1P4/9/9/9/9/4K4 w - - 0 1"
+    moves = ["a5b5", "c5c6", "b5b6", "c6c5", "b6b5", "c5c6", "b5b6"]
+
+    class Engine:
+        async def analyze(self, *_args):
+            return EngineResponse(bestmove="0000", score=None, pv=[])
+
+    result = asyncio.run(main.review_game(Engine(), fen, moves, 8, 350, 1, 128))
+    saved = Review(id="legacy-stop", game_id="legacy-game", history_hash="legacy",
+                   initial_fen_snapshot=fen, moves_snapshot=moves, status=result.status)
+    saved.items = [ReviewItem(ply=item.ply, side=item.side, move=item.move, grade=item.grade, pv=[])
+                   for item in result.items]
+    stop = result.stop
+    saved.items.append(ReviewItem(ply=stop.ply, side=stop.side, move=moves[stop.ply - 1], grade="unknown",
+                                 rule_stop_kind=stop.kind, rule_stop_message=stop.message, pv=[]))
+    restored = cloud_review.progress(saved, cloud_review._legacy_metadata(saved))
+    assert restored.result.model_dump() == {**result.model_dump(), "review_id": saved.id, "game_id": saved.game_id,
+                               "snapshot_hash": saved.history_hash}
+    saved.items[-1].rule_stop_kind = "perpetual_check"
+    assert cloud_review._legacy_metadata(saved) is None
+
+
 def test_long_review_persists_every_segment_and_restores_without_reanalysis(monkeypatch, tmp_path):
     monkeypatch.setenv("EXPORT_ROOT", str(tmp_path))
     calls = fake_search(monkeypatch)

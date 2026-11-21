@@ -118,18 +118,33 @@ describe('public homepage', () => {
 })
 
 describe('long review entry', () => {
-  it('saves a previously local review after consent becomes valid without requiring a new snapshot', async () => {
+  it.each([2, 132])('saves a previously local %i-ply review after consent becomes valid without requiring a new snapshot', async plies => {
     const state = await mountApp()
-    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat()
-    const game = { ...state.createGameRecord('consent-long', '2026-11-16', '2026-11-16'), moves, serverVersion: 132, syncedMoves: 132 }
+    const moves = Array.from({ length: 33 }, () => ['b0c2', 'b9c7', 'c2b0', 'c7b9']).flat().slice(0, plies)
+    const game = { ...state.createGameRecord('consent-long', '2026-11-16', '2026-11-16'), moves, serverVersion: plies, syncedMoves: plies }
     state.savedGames = [game]
     state.history = moves
     state.currentGameId = game.id
-    state.quickReview.restore(state.currentReviewSnapshot, { items: [], analyzed_plies: 132, final_score: null })
+    state.quickReview.restore(state.currentReviewSnapshot, { items: [], analyzed_plies: plies, final_score: null })
     state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
-    vi.mocked(api.persistReview).mockResolvedValueOnce({ items: [], analyzed_plies: 132, final_score: null, review_id: 'consent-saved', game_id: game.id })
+    vi.mocked(api.persistReview).mockResolvedValueOnce({ items: [], analyzed_plies: plies, final_score: null, review_id: 'consent-saved', game_id: game.id })
     state.openReview()
     await vi.waitFor(() => expect(state.quickReview.result.value?.review_id).toBe('consent-saved'))
+  })
+
+  it('persists a browser-only short summary instead of keeping it solely in local storage', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('short-cloud', '2026-11-21', '2026-11-21'), moves: ['a3a4', 'a6a5'], serverVersion: 2, syncedMoves: 2 }
+    state.savedGames = [game]
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    expect(game.reviewCache?.result.review_id).toBeUndefined()
+    state.currentUser = { id: 'owner', status: 'active', privacy_accepted: true }
+    vi.mocked(api.persistReview).mockResolvedValueOnce({ items: [], analyzed_plies: 2, final_score: null, review_id: 'short-saved', game_id: game.id })
+    state.useSavedGame(game)
+    await vi.waitFor(() => expect(state.quickReview.result.value?.review_id).toBe('short-saved'))
+    expect(state.savedGames[0].reviewCache?.result.review_id).toBe('short-saved')
+    expect(api.persistReview).toHaveBeenLastCalledWith(game.id, expect.objectContaining({ moves: game.moves }), expect.any(Function), false)
   })
   it('uses cloud persistence for an owned long game and explicitly regenerates on request', async () => {
     const state = await mountApp()
