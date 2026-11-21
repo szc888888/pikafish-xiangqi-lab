@@ -42,6 +42,9 @@ h1, h2, p { margin: 0; } h1 { font-size: clamp(25px, 4vw, 42px); letter-spacing:
 .workspace { display: grid; grid-template-columns: minmax(390px, .95fr) minmax(460px, 1.05fr); gap: 22px; align-items: start; }
 .board-column { position: sticky; top: 18px; min-width: 0; }
 .board-column .board-panel { position: static; padding: 18px; }
+.board-game-title { margin: 0 0 12px; font-size: 18px; overflow-wrap: anywhere; }
+.current-game-name { overflow-wrap: anywhere; }
+.quick-review-banner strong { overflow-wrap: anywhere; }
 .board-column .board-wrap { width: min(100%, 660px, calc((100vh - 180px) * .9)); }
 .move-strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid #d6dfd9; border-radius: 8px; background: white; font-size: 12px; }
 .move-strip span { overflow: auto; color: #63736b; white-space: nowrap; }

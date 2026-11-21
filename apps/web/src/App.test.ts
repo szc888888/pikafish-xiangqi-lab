@@ -221,6 +221,7 @@ describe('saved game navigation', () => {
     state.useSavedGame(game)
     const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
     expect(html).toContain('aria-label="当前棋局">残局练习</p>')
+    expect(html).toContain('class="board-game-title">残局练习</h2>')
     await state.undo()
     await state.redo()
     expect(state.currentGameName).toBe('残局练习')
@@ -328,9 +329,36 @@ describe('saved game navigation', () => {
     expect(state.savedGames[0].side).toBe('black')
   })
 
+  it('generates a named summary in the background while the saved game stays playable', async () => {
+    const state = await mountApp()
+    const game = { ...state.createGameRecord('background', '2026-11-21', '2026-11-21', '后台小结测试'), moves: ['a3a4', 'a6a5'] }
+    state.savedGames = [game]
+    let finish!: (result: api.ReviewResponse) => void
+    vi.mocked(api.review).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+
+    state.useSavedGame(game)
+    expect(state.quickReview.busy.value).toBe(true)
+    expect(state.reviewDialogOpen).toBe(false)
+    expect(state.canHumanMove).toBe(true)
+    expect(state.canRequestHint).toBe(true)
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(html).toContain('后台小结测试 · 正在后台生成小结…')
+    expect(html).toContain('可继续下棋')
+    state.openReview()
+    state.reviewDialogOpen = false
+    expect(state.quickReview.busy.value).toBe(true)
+    state.setTab('games')
+    finish({ items: [], analyzed_plies: 2, final_score: null, status: 'complete' })
+    await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
+    expect(state.savedGames[0].reviewCache?.result.analyzed_plies).toBe(2)
+    expect(api.review).toHaveBeenCalledTimes(1)
+    expect(state.tab).toBe('games')
+    expect(state.history).toEqual(game.moves)
+  })
+
   it('reuses a cached quick review when reopening the same saved game', async () => {
     const state = await mountApp()
-    const game = { ...state.createGameRecord('chanju2', '2026-11-20', '2026-11-20'), moves: ['a3a4', 'a6a5'] }
+    const game = { ...state.createGameRecord('chanju2', '2026-11-20', '2026-11-20', '残局'), moves: ['a3a4', 'a6a5'] }
     state.savedGames = [game]
     vi.mocked(api.review).mockResolvedValue({ items: [], analyzed_plies: 2, final_score: null, status: 'complete' })
 
@@ -338,6 +366,8 @@ describe('saved game navigation', () => {
     await vi.waitFor(() => expect(state.quickReview.busy.value).toBe(false))
     expect(api.review).toHaveBeenCalledTimes(1)
     expect(state.savedGames[0].reviewCache).toBeDefined()
+    const html = await renderToString(createSSRApp({ ...App, setup: () => state }))
+    expect(html).toContain('残局 · 本局小结')
 
     state.useSavedGame(game)
     await nextTick()
