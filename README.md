@@ -15,7 +15,7 @@ Pikafish Xiangqi Lab 是一个面向中文用户的象棋大厅与分析工作�
 - **提示与悔棋记录**：点击“提示一步”后保存当前局面的候选着法、最佳提示和评估信息；点击“悔棋”后保存撤回的半回合及悔棋后的局面。记录在复盘弹窗中分 Tab 展示，点击单条记录可回看当时棋盘；提示、悔棋和前进操作不会破坏主棋谱的一致性。
 - **棋局数据持久化与兼容**：账号、棋局、走法记录、提示/悔棋事件、复盘结果和隐私同意记录可保存至数据库或浏览器本地存档；支持游客棋局登录后迁移、旧格式棋局导入、数据导出、账号删除请求及删除恢复流程。
 - **AI 棋友大厅**：20 个棋友来自服务端静态目录，保存 `bot_id`、目录版本和创建时快照；推荐和随机挑战由服务端选择，客户端不能覆盖引擎参数。大厅回合支持 `expected_version`、`turn_id` 幂等和 `awaiting_ai` 断线恢复。
-- **共享引擎与有界并发**：单 Uvicorn worker 复用一个 Pikafish 进程，最多 1 个搜索和 2 个排队请求，排队最多等待 5 秒；不使用 `Skill Level` 或 `UCI_Elo`，五档棋力由应用层 profile、候选过滤和选招策略控制。
+- **共享引擎与有界并发**：单 Uvicorn worker 管理一个 Pikafish 进程池，默认 2 个进程，最多 2 个搜索和 4 个排队请求（共 6 个在途请求），排队最多等待 5 秒；通过 `ENGINE_POOL_SIZE`（1 至 8）按 CPU/内存调整。不使用 `Skill Level` 或 `UCI_Elo`，五档棋力由应用层 profile、候选过滤和选招策略控制。
 - **正式战绩**：大厅展示总对局、胜、负、和；只统计本账号已结束的云端正式局，结束对局或删除后刷新。加载失败可重试，不将接口失败显示为零战绩。终局与历史棋局显示中文结束原因。
 - **游客优先体验**：游客对局先保存在浏览器 `localStorage`；登录并同意隐私后可保存云端正式局。游客局导入账号后不会计入正式战绩，正式统计只纳入明确结束的云端大厅对局。
 - **账号选择**：支持第三方 OIDC 登录；未配置 OIDC 时提供邮箱和密码注册/登录。首版默认不要求邮件验证，因此不依赖 SMTP。若启用邮箱验证和密码找回，需另配邮件服务。
@@ -59,8 +59,8 @@ Pikafish Xiangqi Lab 是一个面向中文用户的象棋大厅与分析工作�
 
 - AI 棋友目录：`apps/api/app/ai_friends.json`，固定 20 个启用棋友；配置由服务端校验，棋局保存创建时快照。
 - 大厅服务：`apps/api/app/game_hall.py` 编排用户着法、AI 搜索、规则复核、棋谱写入和同回合重试。
-- 持久化：`Game` 扩展大厅元数据，`GameTurn` 保存幂等回合；迁移文件为 `apps/api/alembic/versions/0007_ai_hall_v1.py`。
-- 部署：第一阶段固定一个 Uvicorn worker，避免每个 worker 启动一套 Pikafish。单 worker 最多 3 个在途引擎请求，超出容量或等待超过 5 秒会返回结构化错误。
+- 持久化：`Game` 扩展大厅元数据，`GameTurn` 保存幂等回合；当前最新迁移为 `apps/api/alembic/versions/0008_admin_role.py`。
+- 部署：固定一个 Uvicorn worker，避免每个 worker 重复创建引擎池。默认每个 API 实例启动 2 个 Pikafish 进程、最多 6 个在途引擎请求；超出容量或等待超过 5 秒会返回结构化错误。多副本部署前需按副本数重新核算 CPU 和内存。
 - 评级范围：V1 不实现 Glicko-2、初始棋力测评、动态评级、能力画像、个性化训练、对局后聊天、好友对弈和排行榜；“推荐棋友”只表达目标体验推荐。
 
 大厅相关接口包括：
@@ -118,7 +118,7 @@ python -m pip install -r requirements.txt
 alembic upgrade head
 ```
 
-如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0007_ai_hall_v1`，包含棋局引擎设置、提示/悔棋事件、AI 棋友元数据和可恢复回合存储。执行前请备份已有数据库；不要使用会删除表的重置操作。
+如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0008_admin_role`，包含 AI 棋友元数据、可恢复回合存储和管理员角色。执行前请备份已有数据库；不要使用会删除表的重置操作。
 
 ### 3. 准备 Pikafish（可选）
 
@@ -338,6 +338,18 @@ npm run dev
 
    如果健康检查正常但引擎不可用，先检查 `PIKAFISH_PATH` 是否可执行、NNUE 路径是否存在，以及服务账号是否有读取和执行权限。引擎启动、UCI 握手和搜索错误会同时记录到项目 `logs/api.log` 和 systemd 日志中。
 7. **验证发布与恢复流程**：检查 `/api/health`、注册/登录、棋局存取、引擎状态、隐私政策状态和 HTTPS Cookie；按[运行手册](docs/operations/account-and-backup.md)配置加密备份、计划任务及恢复演练。
+
+### 管理员与引擎池
+
+管理员使用现有邮箱登录流程。首次启动时同时设置 `ADMIN_EMAIL` 和至少 8 位 `ADMIN_PASSWORD`，应用使用未注册的邮箱创建管理员；已存在的普通账号不会被提升。密码只在首次创建时以哈希保存，不会写入日志。开发模式也可以使用 `X-Dev-User: admin` 进入管理员页面（可通过 `ADMIN_DEV_USER` 修改开发身份）。登录后导航栏会出现“管理中心”，提供用户数量、账号列表、引擎池状态、Pikafish/NNUE 版本和棋力档位查看，并允许重置引擎池。
+
+```dotenv
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=<secret-managed-password>
+ENGINE_POOL_SIZE=2
+```
+
+管理员接口为 `/api/admin/overview`、`/api/admin/users` 和 `/api/admin/engine/reset`，旧的 `/api/engine/reset` 也已收紧为管理员会话，均要求管理员权限。生产环境必须先执行 `alembic upgrade head`，其中 `0008_admin_role` 为管理员角色迁移。
 
 OIDC 如需启用，另行配置 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 和与身份提供商登记地址一致的 `OIDC_REDIRECT_URI`。邮箱密码注册/登录默认不要求验证邮件；启用 `EMAIL_VERIFICATION_REQUIRED=true` 后，必须配置 SMTP 邮件发送参数及 HTTPS `PUBLIC_BASE_URL`。
 

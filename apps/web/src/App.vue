@@ -18,6 +18,7 @@ import { hallResultLabel, terminationLabel } from './lib/hallResult'
 import AiFriendView, { type HallRecentGame } from './components/AiFriendView.vue'
 import HomePracticeHero from './components/HomePracticeHero.vue'
 import ServiceStatusDialog from './components/ServiceStatusDialog.vue'
+import AdminView from './components/AdminView.vue'
 import { createRequestSequence } from './lib/requestSequence'
 import { collectHintCandidates } from './lib/hintCandidates'
 import { normalizeSavedEngineSettings, opponentPresets } from './lib/engineStrength'
@@ -34,7 +35,7 @@ import { useReviewSession, reviewAnalysisKey, reviewSnapshotKey, type ReviewSnap
 import { reviewDisabledReason } from './lib/reviewSummary'
 import { terminalStatus } from './lib/xiangqi'
 
-type Tab = 'hall'|'duel'|'analysis'|'review'|'coach'|'games'
+type Tab = 'hall'|'duel'|'analysis'|'review'|'coach'|'games'|'admin'
 const tabs: { id: Tab; label: string }[] = [{ id:'hall',label:'棋友大厅' },{ id:'duel',label:'AI对弈' },{ id:'analysis',label:'分析' },{ id:'review',label:'复盘' },{ id:'coach',label:'教练' },{ id:'games',label:'棋局' }]
 const tab = ref<Tab>('hall')
 const serviceDialogOpen = ref(false)
@@ -688,7 +689,7 @@ onUnmounted(()=>{if(healthRefreshTimer!==undefined)window.clearInterval(healthRe
 
 <template>
   <main class="shell">
-    <header class="app-nav"><button class="brand-mark" @click="setTab('hall')">棋友<span>大厅</span></button><nav aria-label="主导航"><button v-for="item in [{id:'hall',label:'首页'},{id:'duel',label:'自由练习'},{id:'analysis',label:'分析摆棋'},{id:'games',label:'我的棋局'}]" :key="item.id" :class="{active:tab===item.id}" @click="setTab(item.id as Tab)">{{ item.label }}</button></nav><div class="app-nav-actions"><button class="nav-help" @click="serviceDialogOpen=true">帮助 <span class="nav-health" :class="health?.engine_ready?'ok':'warn'"/> </button><template v-if="!currentUser"><button v-if="authMethods.oidc" class="secondary compact" @click="beginOidcLogin">OIDC 登录</button><button v-if="authMethods.email" class="secondary compact" @click="emailAuthOpen=true;emailAuthTab='login'">登录 / 注册</button></template><div v-else class="account-menu"><details><summary>{{ currentUser.display_name || '我的账号' }}</summary><button v-if="currentUser.status==='deletion_pending'" class="secondary compact" @click="restoreAccount">取消删除</button><button class="secondary compact" @click="logoutCurrent">退出登录</button></details></div></div></header>
+    <header class="app-nav"><button class="brand-mark" @click="setTab('hall')">棋友<span>大厅</span></button><nav aria-label="主导航"><button v-for="item in [{id:'hall',label:'首页'},{id:'duel',label:'自由练习'},{id:'analysis',label:'分析摆棋'},{id:'games',label:'我的棋局'}]" :key="item.id" :class="{active:tab===item.id}" @click="setTab(item.id as Tab)">{{ item.label }}</button><button v-if="currentUser?.role==='admin'" :class="{active:tab==='admin'}" @click="setTab('admin')">管理中心</button></nav><div class="app-nav-actions"><button class="nav-help" @click="serviceDialogOpen=true">帮助 <span class="nav-health" :class="health?.engine_ready?'ok':'warn'"/> </button><template v-if="!currentUser"><button v-if="authMethods.oidc" class="secondary compact" @click="beginOidcLogin">OIDC 登录</button><button v-if="authMethods.email" class="secondary compact" @click="emailAuthOpen=true;emailAuthTab='login'">登录 / 注册</button></template><div v-else class="account-menu"><details><summary>{{ currentUser.display_name || '我的账号' }}</summary><button v-if="currentUser.status==='deletion_pending'" class="secondary compact" @click="restoreAccount">取消删除</button><button class="secondary compact" @click="logoutCurrent">退出登录</button></details></div></div></header>
     <section v-if="currentUser?.status==='active'&&currentUser.privacy_accepted===false" class="privacy-banner"><strong>请确认隐私政策</strong><span>保存棋局前需要同意当前版本（{{ privacyConfig.policy_version }}）。</span><a href="/privacy.html" target="_blank" rel="noopener">阅读隐私政策</a><button class="primary compact" :disabled="privacyBusy" @click="acceptCurrentPrivacy">同意并继续</button></section>
     <template v-if="tab==='hall'">
       <HomePracticeHero :busy="hallBusy || status==='thinking' || replayBusy" :engine-ready="engineReady" :checking="!health && !healthError" @start="startPractice"/>
@@ -697,6 +698,7 @@ onUnmounted(()=>{if(healthRefreshTimer!==undefined)window.clearInterval(healthRe
       <section class="hall-home" id="ai-friends"><div class="section-heading"><div><p class="eyebrow">找一位合拍的对手</p><h2>AI 棋友</h2></div><span>20 位棋友 · 随时开局</span></div><AiFriendView :friends="hallFriends" :recent-games="hallRecentGames" :loading="hallLoading" :busy="hallBusy" :error="hallError" @recommend="(experience, userSide) => matchHall('recommend', experience, userSide)" @random="userSide => matchHall('random', 'practice', userSide)" @retry="loadHall" @challenge="(botId, userSide) => { const friend = hallFriends.find(item => item.bot_id === botId); if (friend) void beginHallGame(friend, userSide) }" @open-games="tab='games'"/></section>
       <GameStatsPanel :eligible="!!statsUserId" :data="gameStats.data.value" :busy="gameStats.busy.value" :error="gameStats.error.value" @refresh="gameStats.refresh"/>
     </template>
+    <AdminView v-else-if="tab==='admin' && currentUser?.role==='admin'" />
     <section v-else class="workspace">
       <div class="board-column"><div class="board-panel"><h2 class="board-game-title">{{ currentGameName }}</h2><label class="board-theme-picker">棋盘风格<select v-model="boardTheme"><option value="classic">经典</option><option value="high-contrast">黑白高对比</option><option value="wood">立体木纹</option></select></label><BoardView :position="displayPosition" :interactive="canHumanMove" :theme="boardTheme" :setup-selected-square="setupSelectedSquare" :last-move="displayedLastMove" :highlight-move="highlightMove" @square="clickSquare"/><div class="turn-line"><span>当前轮次：<b>{{ displayPosition.redToMove?'红方':'黑方' }}</b></span><span>{{ studyMode?'浏览模式':message }}</span></div><button v-if="studyMode" class="return-live" @click="clearStudy">返回当前对局</button></div><div class="move-strip"><strong>本局棋谱</strong><span>{{ history.length?history.map((move,index)=>`${Math.ceil((index+1)/2)}${index%2===0?'.':''} ${move}`).join('　'):'尚未落子' }}</span><button @click="exportMoves">复制</button></div></div>
       <section class="work-panel"><nav class="tabs" aria-label="功能分类"><button v-for="item in tabs" :key="item.id" :class="{active:tab===item.id}" @click="setTab(item.id)">{{ item.label }}<span v-if="item.id==='games'" class="tab-count">{{ savedGames.length }}</span></button></nav>

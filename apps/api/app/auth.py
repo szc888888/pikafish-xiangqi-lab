@@ -79,6 +79,8 @@ def _resolve_user(request: Request, db: Session, *, allow_pending: bool = False)
         user = db.get(User, identity.user_id)
         if user is None or (user.status != "active" and not (allow_pending and user.status == "deletion_pending")):
             raise HTTPException(status_code=410, detail={"code": "account_unavailable", "message": "账号不可用"})
+        if subject == os.getenv("ADMIN_DEV_USER", "admin").strip() and user.role != "admin":
+            user.role = "admin"
         identity.last_login_at = datetime.now(timezone.utc)
         db.commit()
         return user
@@ -107,6 +109,40 @@ def get_consented_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = _resolve_user(request, db)
     if auth_mode() != "dev" and not has_consent(db, user.id):
         raise HTTPException(status_code=403, detail={"code": "privacy_consent_required", "message": "请先阅读并同意隐私政策"})
+    return user
+
+
+def get_admin_user(request: Request, db: Session = Depends(get_db)) -> User:
+    user = _resolve_user(request, db)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail={"code": "admin_required", "message": "需要管理员权限"})
+    return user
+
+
+def ensure_admin_account(db: Session) -> User | None:
+    """Create the configured administrator at startup if it does not exist."""
+    email_value = os.getenv("ADMIN_EMAIL", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if not email_value and not password:
+        return None
+    if not email_value or len(password) < 8:
+        raise RuntimeError("ADMIN_EMAIL 和至少 8 位 ADMIN_PASSWORD 必须同时配置")
+    email = normalize_email(email_value)
+    credential = db.scalar(select(LocalCredential).where(LocalCredential.email == email))
+    if credential is None:
+        user = User(display_name=os.getenv("ADMIN_DISPLAY_NAME", "系统管理员").strip()[:120], role="admin")
+        db.add(user)
+        db.flush()
+        credential = LocalCredential(user_id=user.id, email=email, password_hash=password_hasher.hash(password), email_verified=True)
+        db.add(credential)
+    else:
+        user = db.get(User, credential.user_id)
+        if user is None:
+            raise RuntimeError("管理员凭据对应的账号不存在")
+        if user.role != "admin":
+            raise RuntimeError("管理员邮箱已被普通账号使用，请配置未注册的邮箱")
+    db.commit()
+    db.refresh(user)
     return user
 
 

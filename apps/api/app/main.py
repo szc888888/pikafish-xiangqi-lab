@@ -20,15 +20,15 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .logging_config import REQUEST_ID_HEADER, configure_logging, exception_stack_locations, get_logger, request_id_context
 
-from .engine import EngineQueueFull, EngineQueueTimeout, EngineRuleViolation, EngineUnavailable, PikafishEngine
-from .engine_strength import profile_for, select_candidate
+from .engine import EngineQueueFull, EngineQueueTimeout, EngineRuleViolation, EngineUnavailable, PikafishEnginePool
+from .engine_strength import PROFILE_DEFINITIONS, profile_for, select_candidate
 from .ai_friends import AiFriend, get_friend, load_catalog, random_friend, recommend_friend, snapshot as friend_snapshot
 from .llm import LLMUnavailable, VisionRecognitionError, coach_chat, explain, recognize_board_image
 from .models import AiFriendSummary, AiFriendsResponse, MatchRequest, MatchResponse, RandomMatchRequest, HallGameCreateRequest, TurnRequest, ResignRequest, HallTurnResponse, GameResultResponse, GameStatsResponse, CoachRequest, CoachResponse, DataRequestResponse, EmailAddressRequest, EmailLoginRequest, EmailRegisterRequest, EmailTokenRequest, PasswordResetRequest, PrivacyConsentRequest, EngineRequest, EngineMoveRequest, EngineMoveResponse, EngineResponse, GameCreateRequest, LegacyGameImportRequest, GameMoveResponse, GameResponse, GameUpdateRequest, GameEventsUpdateRequest, MoveCreateRequest, OpeningsResponse, PersistedReviewResponse, PlanAnalysisRequest, PlanAnalysisResponse, PlanExplanation, PlanMoveEvaluation, ReviewRequest, ReviewSegmentRequest, ReviewResponse, SavedEngineSettings, SetupImageResponse, ValidationResponse
-from .auth import get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
+from .auth import ensure_admin_account, get_admin_user, get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
-from .database import assert_database_migrated, get_db, init_database
+from .database import SessionLocal, assert_database_migrated, get_db, init_database
 from .persistence import DataRequest, DeletionTombstone, Game, GameMove, GameTurn, LocalCredential, PrivacyConsent, Review, ReviewItem, User, UserIdentity
 from .deletion_ledger import export_artifact_path, purge_expired_deletions, purge_expired_exports
 from .openings import lookup_openings
@@ -37,7 +37,7 @@ from . import cloud_review
 from .models import CloudReviewRequest, CloudReviewProgress, ReviewAdvanceRequest
 from .game_hall import HallTurnError, submit_turn
 from .xiangqi import Position, START_FEN, describe_uci, history_result, resolve_move_position, terminal_result, terminal_status, validate_candidate, validate_fen, validate_history, validate_moves
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 from . import oidc
 
@@ -45,7 +45,7 @@ configure_logging()
 logger = get_logger(__name__)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
-engine = PikafishEngine()
+engine = PikafishEnginePool()
 
 
 def _api_error(status: int, code: str, message: str) -> HTTPException:
@@ -82,6 +82,8 @@ async def lifespan(_: FastAPI):
         assert_database_migrated()
     else:
         init_database()
+    with SessionLocal() as bootstrap_db:
+        ensure_admin_account(bootstrap_db)
     purge_expired_deletions()
     purge_expired_exports()
     logger.info("application_startup", extra={"event": "application_startup"})
@@ -340,7 +342,7 @@ def _owned_game(db: Session, user: User, game_id: str) -> Game:
 
 @app.get("/api/me")
 async def me(user: User = Depends(get_deletion_user), db: Session = Depends(get_db)) -> dict:
-    return {"id": user.id, "display_name": user.display_name, "status": user.status, "privacy_accepted": has_consent(db, user.id), "policy_version": policy_version()}
+    return {"id": user.id, "display_name": user.display_name, "status": user.status, "role": user.role, "privacy_accepted": has_consent(db, user.id), "policy_version": policy_version()}
 
 
 @app.get("/api/privacy/config")
@@ -920,7 +922,98 @@ async def health() -> dict:
         "error": engine.last_error,
         "llm_configured": bool(llm_base_url and llm_api_key and llm_model),
         "llm_model": llm_model or None,
+        "engine_pool": engine.status(),
     }
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(user: User = Depends(get_admin_user), db: Session = Depends(get_db)) -> dict:
+    del user
+    total_users = db.scalar(select(func.count(User.id))) or 0
+    active_users = db.scalar(select(func.count(User.id)).where(User.status == "active")) or 0
+    pending_users = db.scalar(select(func.count(User.id)).where(User.status == "deletion_pending")) or 0
+    total_games = db.scalar(select(func.count(Game.id)).where(Game.deleted_at.is_(None))) or 0
+    return {
+        "users": {"total": total_users, "active": active_users, "deletion_pending": pending_users},
+        "games": {"total": total_games},
+        "engine": {**engine.status(), "configured": engine.configured, "ready": engine.ready, "error": engine.last_error,
+                   "engine_version": engine.engine_version, "nnue_version": engine.nnue_version,
+                   "path": str(engine.path), "eval_file": engine.eval_file or None},
+        "profiles": [{"key": profile.key, "label": profile.label, "depth": profile.depth,
+                      "movetime_ms": profile.movetime_ms, "threads": profile.threads, "hash_mb": profile.hash_mb}
+                     for profile in PROFILE_DEFINITIONS.values()],
+    }
+
+
+@app.get("/api/admin/users")
+async def admin_users(user: User = Depends(get_admin_user), db: Session = Depends(get_db), limit: int = 100) -> dict:
+    del user
+    limit = max(1, min(limit, 500))
+    rows = db.execute(select(User, LocalCredential.email).outerjoin(LocalCredential, LocalCredential.user_id == User.id).order_by(User.created_at.desc()).limit(limit)).all()
+    user_ids = [item.id for item, _ in rows]
+    identities = db.scalars(select(UserIdentity).where(UserIdentity.user_id.in_(user_ids))).all() if user_ids else []
+    games = db.scalars(select(Game).where(Game.user_id.in_(user_ids), Game.deleted_at.is_(None))).all() if user_ids else []
+    identities_by_user: dict[str, list[UserIdentity]] = {}
+    games_by_user: dict[str, list[Game]] = {}
+    for identity in identities:
+        identities_by_user.setdefault(identity.user_id, []).append(identity)
+    for game in games:
+        games_by_user.setdefault(game.user_id, []).append(game)
+    strength_labels = {key: profile.label for key, profile in PROFILE_DEFINITIONS.items()}
+    strength_order = {key: index for index, key in enumerate(PROFILE_DEFINITIONS)}
+
+    def stats_for(item: User) -> dict:
+        user_games = games_by_user.get(item.id, [])
+        user_identities = identities_by_user.get(item.id, [])
+        activity_times = [item.created_at, item.updated_at]
+        activity_times.extend(identity.last_login_at for identity in user_identities if identity.last_login_at)
+        activity_times.extend(timestamp for game in user_games for timestamp in (game.created_at, game.updated_at) if timestamp)
+        activity_dates = {timestamp.date().isoformat() for timestamp in activity_times if timestamp}
+        hints = 0
+        undos = 0
+        opponents: dict[str, int] = {}
+        for game in user_games:
+            for event in game.events or []:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "hint":
+                    hints += 1
+                elif event.get("type") == "undo":
+                    undos += 1
+            if game.mode != "ai_hall":
+                continue
+            profile = None
+            if isinstance(game.opponent_snapshot, dict):
+                profile = game.opponent_snapshot.get("strength_profile")
+            if not profile and isinstance(game.engine_settings, dict):
+                profile = game.engine_settings.get("difficulty")
+            if profile in strength_labels:
+                opponents[profile] = opponents.get(profile, 0) + 1
+        sorted_opponents = sorted(opponents.items(), key=lambda pair: strength_order[pair[0]])
+        return {
+            "last_active_at": max(activity_times).isoformat() if activity_times else None,
+            "active_days": len(activity_dates),
+            "games_total": len(user_games),
+            "formal_games": sum(1 for game in user_games if game.counts_for_stats),
+            "hints_used": hints,
+            "undos_used": undos,
+            "opponent_games": sum(opponents.values()),
+            "opponent_strengths": [{"key": key, "label": strength_labels[key], "games": count} for key, count in sorted_opponents],
+        }
+
+    return {"users": [{"id": item.id, "email": email, "display_name": item.display_name, "status": item.status,
+                        "role": item.role, "created_at": item.created_at.isoformat(), "updated_at": item.updated_at.isoformat(),
+                        **stats_for(item)} for item, email in rows]}
+
+
+@app.post("/api/admin/engine/reset")
+async def admin_engine_reset(user: User = Depends(get_admin_user)) -> dict:
+    del user
+    await engine.reset()
+    return {"ok": True, "engine": {**engine.status(), "configured": engine.configured, "ready": engine.ready,
+                                     "error": engine.last_error, "engine_version": engine.engine_version,
+                                     "nnue_version": engine.nnue_version, "path": str(engine.path),
+                                     "eval_file": engine.eval_file or None}}
 
 
 @app.post("/api/engine/analyze", response_model=EngineResponse)
@@ -1252,7 +1345,8 @@ async def setup_image(file: UploadFile = File(...)) -> SetupImageResponse:
 
 
 @app.post("/api/engine/reset")
-async def reset() -> dict:
+async def reset(user: User = Depends(get_admin_user)) -> dict:
+    del user
     await engine.reset()
     return await health()
 

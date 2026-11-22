@@ -458,3 +458,122 @@ class PikafishEngine:
                 return rows
         return {}
 
+
+class PikafishEnginePool:
+    """Own a bounded set of independent UCI engines behind one API contract.
+
+    Each child still serializes its own stdin/stdout traffic. The pool only
+    dispatches complete searches, so increasing the pool size increases game
+    concurrency without allowing UCI commands to interleave.
+    """
+
+    def __init__(self) -> None:
+        size = max(1, min(8, int(os.getenv("ENGINE_POOL_SIZE", "2"))))
+        self.pool_size = size
+        self.engines = [PikafishEngine() for _ in range(size)]
+        self._selection_lock = asyncio.Lock()
+        self._inflight = 0
+        self._assignments = [0] * size
+        self._lifecycle_lock = asyncio.Lock()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._accepting = True
+
+    @property
+    def path(self) -> Path:
+        return self.engines[0].path
+
+    @property
+    def eval_file(self) -> str:
+        return self.engines[0].eval_file
+
+    @property
+    def configured(self) -> bool:
+        return any(engine.configured for engine in self.engines)
+
+    @property
+    def ready(self) -> bool:
+        return any(engine.ready for engine in self.engines)
+
+    @property
+    def last_error(self) -> str | None:
+        errors = [engine.last_error for engine in self.engines if engine.last_error]
+        return "; ".join(errors) if errors else None
+
+    @property
+    def engine_version(self) -> str | None:
+        return next((engine.engine_version for engine in self.engines if engine.engine_version), None)
+
+    @property
+    def nnue_version(self) -> str | None:
+        return next((engine.nnue_version for engine in self.engines if engine.nnue_version), None)
+
+    @property
+    def max_inflight(self) -> int:
+        return sum(engine.max_inflight for engine in self.engines)
+
+    @property
+    def inflight(self) -> int:
+        return self._inflight
+
+    @property
+    def ready_engines(self) -> int:
+        return sum(engine.ready for engine in self.engines)
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "pool_size": self.pool_size,
+            "ready_engines": self.ready_engines,
+            "max_inflight": self.max_inflight,
+            "inflight": self.inflight,
+            "engines": [
+                {"index": index, "pid": getattr(engine.process, "pid", None), "ready": engine.ready,
+                 "configured": engine.configured, "path": str(engine.path), "eval_file": engine.eval_file or None}
+                for index, engine in enumerate(self.engines, start=1)
+            ],
+        }
+
+    async def start(self) -> None:
+        async with self._lifecycle_lock:
+            await asyncio.gather(*(engine.start() for engine in self.engines))
+            self._accepting = True
+
+    async def stop(self) -> None:
+        async with self._lifecycle_lock:
+            self._accepting = False
+            await self._idle.wait()
+            await asyncio.gather(*(engine.stop() for engine in self.engines))
+
+    async def reset(self) -> None:
+        async with self._lifecycle_lock:
+            self._accepting = False
+            await self._idle.wait()
+            await asyncio.gather(*(engine.reset() for engine in self.engines))
+            self._accepting = True
+
+    async def _reserve(self) -> int:
+        async with self._selection_lock:
+            if not self._accepting:
+                raise EngineUnavailable("Pikafish 引擎池正在重置，请稍后重试")
+            if self._inflight >= self.max_inflight:
+                raise EngineQueueFull(f"Pikafish 引擎池当前已有 {self.max_inflight} 个请求在途，请稍后重试")
+            index = min(range(self.pool_size), key=lambda item: (self._assignments[item], item))
+            self._assignments[index] += 1
+            self._inflight += 1
+            self._idle.clear()
+            return index
+
+    async def _release(self, index: int) -> None:
+        async with self._selection_lock:
+            self._assignments[index] = max(0, self._assignments[index] - 1)
+            self._inflight = max(0, self._inflight - 1)
+            if self._inflight == 0:
+                self._idle.set()
+
+    async def analyze(self, *args: Any, **kwargs: Any) -> EngineResponse:
+        index = await self._reserve()
+        try:
+            return await self.engines[index].analyze(*args, **kwargs)
+        finally:
+            await self._release(index)
+

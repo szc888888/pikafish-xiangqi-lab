@@ -36,7 +36,7 @@ BACKUP_ENCRYPTION_KEY=<32 字节随机密钥的 Base64>
 
 ## 迁移与备份
 
-安装与 PostgreSQL 服务端兼容的 `pg_dump`、`pg_restore`、`psql`、`createdb`，并使其在 `PATH`，或设置 `PG_BIN_DIR`。当前仓库迁移 head 为 `0007_ai_hall_v1`。先备份实际数据库，在隔离库完成 upgrade/downgrade/upgrade 演练，再从 `apps/api` 使用当前平台虚拟环境执行 `python -m alembic heads` 和 `python -m alembic current` 核对仓库与数据库版本，确认后执行 `python -m alembic upgrade head`。不要回改已发布迁移，也不要使用测试重置数据库操作。
+安装与 PostgreSQL 服务端兼容的 `pg_dump`、`pg_restore`、`psql`、`createdb`，并使其在 `PATH`，或设置 `PG_BIN_DIR`。当前仓库迁移 head 为 `0008_admin_role`。先备份实际数据库，在隔离库完成 upgrade/downgrade/upgrade 演练，再从 `apps/api` 使用当前平台虚拟环境执行 `python -m alembic heads` 和 `python -m alembic current` 核对仓库与数据库版本，确认后执行 `python -m alembic upgrade head`。不要回改已发布迁移，也不要使用测试重置数据库操作。
 
 ```powershell
 cd D:\chess

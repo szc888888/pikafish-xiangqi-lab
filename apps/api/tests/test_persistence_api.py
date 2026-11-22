@@ -252,8 +252,8 @@ def test_persisted_review_keeps_engine_versions_and_rule_stop_item(monkeypatch):
         )
 
     monkeypatch.setattr(main_module, "review_game", fake_review)
-    monkeypatch.setattr(main_module.engine, "engine_version", "Pikafish 2026-test", raising=False)
-    monkeypatch.setattr(main_module.engine, "nnue_version", "sha256:test-model", raising=False)
+    monkeypatch.setattr(main_module.engine.engines[0], "engine_version", "Pikafish 2026-test", raising=False)
+    monkeypatch.setattr(main_module.engine.engines[0], "nnue_version", "sha256:test-model", raising=False)
     with TestClient(app) as client:
         headers = {"X-Dev-User": "review-metadata"}
         game = client.post("/api/games", headers=headers, json={"initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"}).json()

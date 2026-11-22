@@ -1,4 +1,4 @@
-export interface Health { api_ready: boolean; engine_configured: boolean; engine_ready: boolean; engine_path: string; eval_file: string | null; error: string | null; llm_configured: boolean; llm_model: string | null }
+export interface Health { api_ready: boolean; engine_configured: boolean; engine_ready: boolean; engine_path: string; eval_file: string | null; error: string | null; llm_configured: boolean; llm_model: string | null; engine_pool?: Pick<AdminOverview['engine'], 'pool_size' | 'ready_engines' | 'max_inflight' | 'inflight'> }
 export interface Score { type: 'cp' | 'mate'; value: number }
 export interface EngineLine { rank: number; move: string; label: string; score: Score | null; depth: number | null; pv: string[] }
 export interface CandidateRejection { move: string; code: string; reason: string }
@@ -24,7 +24,15 @@ export interface GameResult { game_id: string; result: 'red_win'|'black_win'|'dr
 export interface GameStats { total: number; red_wins: number; black_wins: number; draws: number; wins: number; losses: number }
 export interface DataRequest { id: string; type: 'export' | 'delete'; status: string; expires_at: string | null; download_url: string | null }
 export interface AuthMethods { email: boolean; oidc: boolean; email_verification_required: boolean }
-export interface AuthUser { id: string; display_name: string | null; status: string; privacy_accepted?: boolean; policy_version?: string }
+export interface AuthUser { id: string; display_name: string | null; status: string; role?: 'user' | 'admin'; privacy_accepted?: boolean; policy_version?: string }
+export interface AdminOverview {
+  users: { total: number; active: number; deletion_pending: number }
+  games: { total: number }
+  engine: { pool_size: number; ready_engines: number; max_inflight: number; inflight: number; configured: boolean; ready: boolean; error: string | null; engine_version: string | null; nnue_version: string | null; path: string; eval_file: string | null; engines: { index: number; pid: number | null; ready: boolean; configured: boolean; path: string; eval_file: string | null }[] }
+  profiles: { key: string; label: string; depth: number; movetime_ms: number; threads: number; hash_mb: number }[]
+}
+export interface AdminUserStrength { key: 'companion' | 'beginner' | 'progress' | 'serious' | 'full'; label: string; games: number }
+export interface AdminUser { id: string; email: string | null; display_name: string | null; status: string; role: 'user' | 'admin'; created_at: string; updated_at: string; last_active_at: string | null; active_days: number; games_total: number; formal_games: number; hints_used: number; undos_used: number; opponent_games: number; opponent_strengths: AdminUserStrength[] }
 export interface PrivacyConfig { policy_version: string; effective_date: string; operator_name: string; contact_email: string; ready_for_publication: boolean }
 
 export type ApiErrorCategory = 'network_error' | 'http_error' | 'invalid_response' | 'timeout' | 'aborted' | 'unknown'
@@ -249,6 +257,9 @@ export async function persistReview(gameId: string, payload: ReviewPayload, prog
 export const getOpenings = (payload: { fen: string; moves: string[] }) => request<{ matches: OpeningLine[] }>('/api/openings', { method: 'POST', body: JSON.stringify(payload) })
 export const coachChat = (payload: { question: string; fen: string; moves: string[]; messages: CoachMessage[]; context: string }) => request<{ answer: string; ai_available: boolean; ai_message: string | null }>('/api/coach/chat', { method: 'POST', body: JSON.stringify(payload) })
 export const getMe = () => request<AuthUser>('/api/me')
+export const getAdminOverview = () => request<AdminOverview>('/api/admin/overview')
+export const getAdminUsers = () => request<{ users: AdminUser[] }>('/api/admin/users')
+export const resetAdminEngine = () => request<{ ok: boolean; engine: AdminOverview['engine'] }>('/api/admin/engine/reset', { method: 'POST' })
 export const getPrivacyConfig = () => request<PrivacyConfig>('/api/privacy/config')
 export const acceptPrivacy = (policy_version: string) => request<{ accepted: boolean }>('/api/me/privacy-consent', { method: 'POST', body: JSON.stringify({ accepted: true, policy_version }) })
 export const getAuthMethods = () => request<AuthMethods>('/api/auth/methods')
