@@ -118,7 +118,7 @@ python -m pip install -r requirements.txt
 alembic upgrade head
 ```
 
-如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0008_admin_role`，包含 AI 棋友元数据、可恢复回合存储和管理员角色。执行前请备份已有数据库；不要使用会删除表的重置操作。
+如果使用 PostgreSQL，请先创建 `chess` 数据库，并在项目根目录 `.env` 设置正确的 `DATABASE_URL`，再执行迁移。当前 Alembic 最新迁移为 `0009_game_client_platform`，包含 AI 棋友元数据、可恢复回合存储、管理员角色和对局来源。执行前请备份已有数据库；不要使用会删除表的重置操作。
 
 ### 3. 准备 Pikafish（可选）
 
@@ -349,7 +349,11 @@ ADMIN_PASSWORD=<secret-managed-password>
 ENGINE_POOL_SIZE=2
 ```
 
-管理员接口为 `/api/admin/overview`、`/api/admin/users` 和 `/api/admin/engine/reset`，旧的 `/api/engine/reset` 也已收紧为管理员会话，均要求管理员权限。生产环境必须先执行 `alembic upgrade head`，其中 `0008_admin_role` 为管理员角色迁移。
+管理员接口为 `/api/admin/overview`、`/api/admin/users` 和 `/api/admin/engine/reset`，旧的 `/api/engine/reset` 也已收紧为管理员会话，均要求管理员权限。生产环境必须先执行 `alembic upgrade head`，其中 `0008_admin_role` 为管理员角色迁移，`0009_game_client_platform` 为对局来源迁移。
+
+棋局列表展示每盘棋的“对局来源”：**PC 端 / 小程序端 / 手机网页 / 暂无记录**；管理中心用户列表的对局数据按来源汇总局数。来源记录创建该盘棋局的客户端，跨端查看或续下不会覆盖来源。游客本地保存、登录导入、账号导出均保留来源；旧棋局无法追溯时标记为 `unknown`，不按上传设备回填。
+
+网页请求自动发送 `X-Client-Platform`，识别小程序 WebView 的 `__wxjs_environment=miniprogram` 或 User-Agent 中的 `miniProgram` 标记。独立小程序创建棋局时应携带 `X-Client-Platform: mini_program`；PC 为 `pc`、手机网页为 `mobile_web`、无法识别为 `unknown`。没有请求头的旧客户端按 User-Agent 兼容识别；无效来源记为 `unknown`，普通微信浏览器不会仅因微信标记被当作小程序。游客导入使用可选字段 `client_platform`（上述四种值），缺省 `unknown`，不使用导入请求的设备来源。来源仅为客户端上报的统计信息，不作为身份、权限或正式战绩依据。
 
 OIDC 如需启用，另行配置 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 和与身份提供商登记地址一致的 `OIDC_REDIRECT_URI`。邮箱密码注册/登录默认不要求验证邮件；启用 `EMAIL_VERIFICATION_REQUIRED=true` 后，必须配置 SMTP 邮件发送参数及 HTTPS `PUBLIC_BASE_URL`。
 

@@ -322,7 +322,11 @@ class GameCreateRequest(BaseModel):
     events: list[dict] = Field(default_factory=list, max_length=1000)
 
 
+ClientPlatform = Literal["pc", "mini_program", "mobile_web", "unknown"]
+
+
 class LegacyGameImportRequest(BaseModel):
+    client_platform: ClientPlatform = "unknown"
     legacy_id: str = Field(min_length=1, max_length=200)
     name: str | None = Field(default=None, max_length=120)
     initial_fen: str = Field(min_length=1, max_length=200)
@@ -361,6 +365,7 @@ class GameMoveResponse(BaseModel):
 
 
 class GameResponse(BaseModel):
+    client_platform: ClientPlatform = "unknown"
     id: str
     name: str | None
     initial_fen: str

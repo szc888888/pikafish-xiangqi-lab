@@ -28,6 +28,7 @@ from .models import AiFriendSummary, AiFriendsResponse, MatchRequest, MatchRespo
 from .auth import ensure_admin_account, get_admin_user, get_current_user, get_consented_user, get_deletion_user, login_email, oidc_configured, register_email, normalize_email, password_hasher, log_auth_event
 from .email_flow import consume_token, email_verification_required, request_action, revoke_tokens
 from .privacy import has_consent, policy_version, publication_missing, record_consent, validate_publication_configuration
+from .client_platform import client_platform
 from .database import SessionLocal, assert_database_migrated, get_db, init_database
 from .persistence import DataRequest, DeletionTombstone, Game, GameMove, GameTurn, LocalCredential, PrivacyConsent, Review, ReviewItem, User, UserIdentity
 from .deletion_ledger import export_artifact_path, purge_expired_deletions, purge_expired_exports
@@ -287,6 +288,7 @@ def _game_response(game: Game) -> GameResponse:
     pending_turn = next((turn for turn in game.turns if turn.status == "ai_pending"), None)
     return GameResponse(
         id=game.id,
+        client_platform=game.client_platform or "unknown",
         name=game.name,
         initial_fen=game.initial_fen,
         current_fen=game.current_fen,
@@ -516,7 +518,7 @@ def list_games(user: User = Depends(get_consented_user), db: Session = Depends(g
 
 
 @app.post("/api/games", response_model=GameResponse, status_code=201)
-async def create_game(payload: GameCreateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+async def create_game(request: Request, payload: GameCreateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     if user.status != "active":
         raise _api_error(410, "account_unavailable", "账号正在删除或已删除")
     try:
@@ -524,7 +526,7 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
     except ValueError as exc:
         raise _api_error(400, "invalid_fen", str(exc)) from exc
     _validate_game_events(payload.initial_fen.strip(), payload.events)
-    game = Game(user_id=user.id, name=payload.name, user_side=payload.user_side, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(), events=payload.events)
+    game = Game(user_id=user.id, client_platform=client_platform(request), name=payload.name, user_side=payload.user_side, initial_fen=payload.initial_fen.strip(), current_fen=_position_to_fen(position), red_to_move=position.red_to_move, status="finished" if terminal_status(position) else "active", engine_settings=_normalized_engine_settings(payload.engine_settings).model_dump(), events=payload.events)
     db.add(game)
     db.commit()
     db.refresh(game)
@@ -532,7 +534,7 @@ async def create_game(payload: GameCreateRequest, user: User = Depends(get_conse
 
 
 @app.post("/api/hall/games", response_model=GameResponse, status_code=201)
-async def create_hall_game(payload: HallGameCreateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
+async def create_hall_game(request: Request, payload: HallGameCreateRequest, user: User = Depends(get_consented_user), db: Session = Depends(get_db)) -> GameResponse:
     if user.status != "active":
         raise _api_error(410, "account_unavailable", "账号正在删除或已删除")
     try:
@@ -543,6 +545,7 @@ async def create_hall_game(payload: HallGameCreateRequest, user: User = Depends(
     game = Game(
         user_id=user.id,
         name=payload.name or friend.name,
+        client_platform=client_platform(request),
         initial_fen=START_FEN,
         current_fen=START_FEN,
         red_to_move=True,
@@ -602,6 +605,7 @@ def import_legacy_game(payload: LegacyGameImportRequest, response: Response, use
     game = Game(
         user_id=user.id,
         legacy_id=payload.legacy_id,
+        client_platform=payload.client_platform,
         name=payload.name,
         initial_fen=payload.initial_fen.strip(),
         current_fen=_position_to_fen(final),
@@ -968,6 +972,9 @@ async def admin_users(user: User = Depends(get_admin_user), db: Session = Depend
         activity_times = [item.created_at, item.updated_at]
         activity_times.extend(identity.last_login_at for identity in user_identities if identity.last_login_at)
         activity_times.extend(timestamp for game in user_games for timestamp in (game.created_at, game.updated_at) if timestamp)
+        # SQLite returns naive datetimes, while freshly authenticated identities use UTC.
+        activity_times = [timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp.astimezone(timezone.utc)
+                          for timestamp in activity_times if timestamp]
         activity_dates = {timestamp.date().isoformat() for timestamp in activity_times if timestamp}
         hints = 0
         undos = 0
@@ -994,6 +1001,9 @@ async def admin_users(user: User = Depends(get_admin_user), db: Session = Depend
             "last_active_at": max(activity_times).isoformat() if activity_times else None,
             "active_days": len(activity_dates),
             "games_total": len(user_games),
+            "game_platforms": [{"platform": platform, "games": sum(1 for game in user_games if (game.client_platform or "unknown") == platform)}
+                               for platform in ("pc", "mini_program", "mobile_web", "unknown")
+                               if any((game.client_platform or "unknown") == platform for game in user_games)],
             "formal_games": sum(1 for game in user_games if game.counts_for_stats),
             "hints_used": hints,
             "undos_used": undos,

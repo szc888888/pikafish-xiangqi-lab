@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { detectClientPlatform } from './lib/clientPlatform'
 import { acceptPrivacy, analyze, analyzePlan, appendGameMove, beginOidcLogin, cancelDeletion, coachChat, createGame, createHallGame, deleteGame, engineMove, forgotPassword, getAiFriends, getAuthMethods, getGame, getGames, getHealth, getMe, getOpenings, getPrivacyConfig, importGame, loginEmail, logout, persistReview, randomMatch, recognizeSetupImage, recommendMatch, registerEmail, requestEmailVerification, resetPassword, review, resignHallGame, submitHallTurn, updateGameEvents, verifyEmail, type AiFriend, type Analysis, type AuthMethods, type AuthUser, type CoachMessage, type Health, type OpeningLine, type PersistedEngineSettings, type PersistedGame, type PersistedGameEvent, type PlanAnalysis, type PrivacyConfig, type ReviewItem, type ReviewResponse } from './lib/api'
 import { importLegacyVersion, migrateLegacyGames } from './lib/legacyGameMigration'
 import { applyMove, clonePosition, describeUci, fromUci, legalTargets, movePiece, parseFen, perpetualCheckSide, perpetualChaseSide, setPiece, START_FEN, toFen, toUci, validateSetupPosition, type Piece, type Position } from './lib/xiangqi'
@@ -330,7 +331,7 @@ function readSavedGames(){
 }
 function serverGameRecord(game:PersistedGame):SavedGame{
   const settings=normalizeSavedEngineSettings(game.engine_settings)
-return{id:game.id,name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),events:game.events??[],side:game.user_side??'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length,syncedEvents:game.events?.length??0,mode:game.mode,opponentId:game.opponent_id??undefined,opponentSnapshot:game.opponent_snapshot??undefined,userSide:game.user_side??undefined,origin:game.origin,status:game.status,result:game.result,terminationReason:game.termination_reason,pendingTurnId:game.pending_turn_id??null,pendingUserUci:game.pending_turn_user_uci??null,pendingExpectedVersion:game.pending_turn_expected_version??null}
+return{id:game.id,clientPlatform:game.client_platform??'unknown',name:game.name??'',startedAt:game.created_at,updatedAt:game.updated_at,baseFen:game.initial_fen,moves:game.moves.map(move=>move.uci),events:game.events??[],side:game.user_side??'watch',depth:settings.depth,movetime:settings.movetime_ms,multipv:3,difficulty:settings.difficulty,difficultySettings:{...settings,hintLimit:null},hintSettings:{difficulty:'regular',depth:10,movetime_ms:1500,multipv:3,showCandidates:true},hintsUsed:0,serverVersion:game.version,syncedMoves:game.moves.length,syncedEvents:game.events?.length??0,mode:game.mode,opponentId:game.opponent_id??undefined,opponentSnapshot:game.opponent_snapshot??undefined,userSide:game.user_side??undefined,origin:game.origin,status:game.status,result:game.result,terminationReason:game.termination_reason,pendingTurnId:game.pending_turn_id??null,pendingUserUci:game.pending_turn_user_uci??null,pendingExpectedVersion:game.pending_turn_expected_version??null}
 }
 function gameEngineSettings(game:SavedGame):PersistedEngineSettings{return{difficulty:game.difficulty,allow_suboptimal:game.difficultySettings.allow_suboptimal,depth:game.difficultySettings.depth,movetime_ms:game.difficultySettings.movetime_ms,threads:game.difficultySettings.threads,hash_mb:game.difficultySettings.hash_mb}}
 interface GameMigrationResult { migrated:number; failed:number }
@@ -338,9 +339,9 @@ const gameUploadBusy=ref(false)
 let gameUploadRevision=0
 async function importLocalGame(game:SavedGame){
     const localId=game.id
-    const remote=await importLegacyVersion({legacy_id:localId,name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events,mode:game.mode??'legacy',user_side:game.userSide??(game.side==='watch'?undefined:game.side),opponent_id:game.opponentId,opponent_snapshot:game.opponentSnapshot},importGame)
+    const remote=await importLegacyVersion({legacy_id:localId,client_platform:game.clientPlatform??'unknown',name:game.name||undefined,initial_fen:game.baseFen,moves:game.moves,engine_settings:gameEngineSettings(game),events:game.events,mode:game.mode??'legacy',user_side:game.userSide??(game.side==='watch'?undefined:game.side),opponent_id:game.opponentId,opponent_snapshot:game.opponentSnapshot},importGame)
     await getGame(remote.id)
-    game.id=remote.id;game.serverVersion=remote.version;game.syncedMoves=remote.moves.length;game.syncedEvents=remote.events.length
+    game.id=remote.id;game.clientPlatform=remote.client_platform??'unknown';game.serverVersion=remote.version;game.syncedMoves=remote.moves.length;game.syncedEvents=remote.events.length
     if(currentGameId.value===localId)currentGameId.value=remote.id
     gameUploadRevision++
     persistGames()
@@ -417,12 +418,12 @@ async function processEmailAction(){const params=new URLSearchParams(window.loca
 async function logoutCurrent(){await logout();currentUser.value=null;savedGames.value=[];currentGameId.value=null;message.value='已退出登录'}
 function persistGames(){try{localStorage.setItem(GAME_STORAGE_KEY,JSON.stringify(savedGames.value))}catch{message.value='浏览器存储不可用，棋局仅保留在当前页面'}}
 function currentEngineSettings():PersistedEngineSettings{return{difficulty:difficulty.value,allow_suboptimal:allowSuboptimal.value,depth:depth.value,movetime_ms:movetime.value,threads:threads.value,hash_mb:hashMb.value}}
-function createGameRecord(id:string, startedAt:string, updatedAt:string, name=''):SavedGame{return{id,name,startedAt,updatedAt,baseFen:baseFen.value,moves:[...history.value],events:[...gameEvents.value],side:side.value,depth:depth.value,movetime:movetime.value,multipv:analysisMultiPv.value,difficulty:difficulty.value,difficultySettings:{...currentEngineSettings(),hintLimit:null},hintSettings:{difficulty:hintDifficulty.value,depth:hintDepth.value,movetime_ms:hintMovetime.value,multipv:hintMultiPv.value,showCandidates:showHintCandidates.value},hintsUsed:hintUsed.value,reviewCache:cachedReviewFor(currentReviewSnapshot.value)}}
+function createGameRecord(id:string, startedAt:string, updatedAt:string, name=''):SavedGame{return{id,name,startedAt,updatedAt,clientPlatform:detectClientPlatform(),baseFen:baseFen.value,moves:[...history.value],events:[...gameEvents.value],side:side.value,depth:depth.value,movetime:movetime.value,multipv:analysisMultiPv.value,difficulty:difficulty.value,difficultySettings:{...currentEngineSettings(),hintLimit:null},hintSettings:{difficulty:hintDifficulty.value,depth:hintDepth.value,movetime_ms:hintMovetime.value,multipv:hintMultiPv.value,showCandidates:showHintCandidates.value},hintsUsed:hintUsed.value,reviewCache:cachedReviewFor(currentReviewSnapshot.value)}}
 function saveCurrentGame(){
   if(!currentGameId.value)return
   const now=new Date().toISOString(),existing=savedGames.value.find(g=>g.id===currentGameId.value)
   if(!history.value.length&&!gameEvents.value.length&&!existing)return
-  const record=createGameRecord(currentGameId.value,existing?.startedAt??now,now,existing?.name??'')
+  const record=createGameRecord(currentGameId.value,existing?.startedAt??now,now,existing?.name??'');if(existing)record.clientPlatform=existing.clientPlatform??'unknown'
   if(existing)Object.assign(existing,record);else savedGames.value.unshift(record)
   savedGames.value.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));persistGames();if(existing)void syncCurrentGame(existing)
 }

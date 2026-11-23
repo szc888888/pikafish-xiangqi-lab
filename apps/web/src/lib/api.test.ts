@@ -89,6 +89,7 @@ describe('API request diagnostics', () => {
       headers: expect.objectContaining({
         'Content-Type': 'application/json',
         'X-Request-ID': 'client-request-id',
+        'x-client-platform': expect.any(String),
       }),
     }))
     expect(randomUUID).toHaveBeenCalledOnce()

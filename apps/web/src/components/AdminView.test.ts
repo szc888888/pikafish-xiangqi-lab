@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import AdminView from './AdminView.vue'
+import type { ClientPlatform } from '../lib/clientPlatform'
 import { getAdminOverview, getAdminUsers } from '../lib/api'
 
 vi.mock('../lib/api', () => ({
@@ -33,6 +34,7 @@ const overview = {
 const users = [{
   id: 'user-1', email: 'test@example.com', display_name: '测试用户', status: 'active', role: 'user' as const,
   created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-22T00:00:00Z', last_active_at: '2026-11-22T00:00:00Z',
+  game_platforms: [{ platform: 'pc' as ClientPlatform, games: 7 }, { platform: 'mini_program' as ClientPlatform, games: 2 }],
   active_days: 3, games_total: 9, formal_games: 2, hints_used: 4, undos_used: 1, opponent_games: 9,
   opponent_strengths: [{ key: 'companion' as const, label: '轻松陪练', games: 9 }],
 }]
@@ -58,6 +60,9 @@ describe('admin user strength details', () => {
     app.mount(root)
     await vi.waitFor(() => expect(root?.querySelector('.admin-game-count')).not.toBeNull())
     await nextTick()
+
+    expect(root.querySelector('.admin-game-platforms')?.textContent).toContain('PC 端 7 局')
+    expect(root.querySelector('.admin-game-platforms')?.textContent).toContain('小程序端 2 局')
 
     const gameCount = root.querySelector<HTMLButtonElement>('.admin-game-count')!
     expect(gameCount.getAttribute('aria-expanded')).toBe('false')

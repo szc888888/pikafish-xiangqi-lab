@@ -1,3 +1,5 @@
+import { detectClientPlatform, type ClientPlatform } from './clientPlatform'
+
 export interface Health { api_ready: boolean; engine_configured: boolean; engine_ready: boolean; engine_path: string; eval_file: string | null; error: string | null; llm_configured: boolean; llm_model: string | null; engine_pool?: Pick<AdminOverview['engine'], 'pool_size' | 'ready_engines' | 'max_inflight' | 'inflight'> }
 export interface Score { type: 'cp' | 'mate'; value: number }
 export interface EngineLine { rank: number; move: string; label: string; score: Score | null; depth: number | null; pv: string[] }
@@ -14,7 +16,7 @@ export interface SetupImageResult { fen: string; red_to_move: boolean; piece_cou
 export interface PersistedGameMove { ply: number; side: 'red' | 'black'; uci: string; notation_zh: string; before_fen: string; after_fen: string }
 export interface PersistedEngineSettings { difficulty: 'companion' | 'beginner' | 'progress' | 'serious' | 'full' | 'custom'; allow_suboptimal: boolean; depth: number; movetime_ms: number; threads: number; hash_mb: number }
 export interface PersistedGameEvent { id: string; type: 'undo' | 'hint'; createdAt: string; ply: number; positionMoves: string[]; positionFen: string; undoneMoves?: string[]; candidates?: { move: string; label: string; score: Score | null }[] }
-export interface PersistedGame { id: string; name: string | null; initial_fen: string; current_fen: string; red_to_move: boolean; status: string; version: number; created_at: string; updated_at: string; engine_settings: PersistedEngineSettings; moves: PersistedGameMove[]; events: PersistedGameEvent[]; mode?: 'legacy'|'ai_hall'; user_side?: 'red'|'black'|null; opponent_id?: string|null; opponent_config_version?: string|null; opponent_snapshot?: AiFriend|null; result?: 'red_win'|'black_win'|'draw'|null; termination_reason?: string|null; finished_at?: string|null; origin?: 'cloud_formal'|'guest_local'|'guest_import'|'legacy'; counts_for_stats?: boolean; pending_turn_id?: string|null; pending_turn_expected_version?: number|null; pending_turn_user_uci?: string|null }
+export interface PersistedGame { client_platform?: ClientPlatform; id: string; name: string | null; initial_fen: string; current_fen: string; red_to_move: boolean; status: string; version: number; created_at: string; updated_at: string; engine_settings: PersistedEngineSettings; moves: PersistedGameMove[]; events: PersistedGameEvent[]; mode?: 'legacy'|'ai_hall'; user_side?: 'red'|'black'|null; opponent_id?: string|null; opponent_config_version?: string|null; opponent_snapshot?: AiFriend|null; result?: 'red_win'|'black_win'|'draw'|null; termination_reason?: string|null; finished_at?: string|null; origin?: 'cloud_formal'|'guest_local'|'guest_import'|'legacy'; counts_for_stats?: boolean; pending_turn_id?: string|null; pending_turn_expected_version?: number|null; pending_turn_user_uci?: string|null }
 export interface AiFriend { bot_id: string; name: string; avatar_key: string; description: string; category: 'casual'|'practice'|'challenge'; style: string[]; personality: string[]; strength_profile: 'companion'|'beginner'|'progress'|'serious'|'full'; config_version: string; experiences: ('casual'|'practice'|'challenge')[]; enabled: boolean; is_ai: true }
 export interface AiFriendsResponse { catalog_version: string; friends: AiFriend[]; recommended_ids: string[] }
 export interface MatchResponse { match_type: 'recommend'|'random'; experience: string | null; opponent: AiFriend; catalog_version: string }
@@ -32,7 +34,7 @@ export interface AdminOverview {
   profiles: { key: string; label: string; depth: number; movetime_ms: number; threads: number; hash_mb: number }[]
 }
 export interface AdminUserStrength { key: 'companion' | 'beginner' | 'progress' | 'serious' | 'full'; label: string; games: number }
-export interface AdminUser { id: string; email: string | null; display_name: string | null; status: string; role: 'user' | 'admin'; created_at: string; updated_at: string; last_active_at: string | null; active_days: number; games_total: number; formal_games: number; hints_used: number; undos_used: number; opponent_games: number; opponent_strengths: AdminUserStrength[] }
+export interface AdminUser { game_platforms?: { platform: ClientPlatform; games: number }[]; id: string; email: string | null; display_name: string | null; status: string; role: 'user' | 'admin'; created_at: string; updated_at: string; last_active_at: string | null; active_days: number; games_total: number; formal_games: number; hints_used: number; undos_used: number; opponent_games: number; opponent_strengths: AdminUserStrength[] }
 export interface PrivacyConfig { policy_version: string; effective_date: string; operator_name: string; contact_email: string; ready_for_publication: boolean }
 
 export type ApiErrorCategory = 'network_error' | 'http_error' | 'invalid_response' | 'timeout' | 'aborted' | 'unknown'
@@ -122,6 +124,7 @@ function headersForRequest(options: RequestInit | undefined, requestId: string):
   if (!headers.has('Content-Type') && !(typeof FormData !== 'undefined' && options?.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json')
   }
+  headers.set('X-Client-Platform', detectClientPlatform())
   headers.set(REQUEST_ID_HEADER, requestId)
   const result = Object.fromEntries(headers.entries())
   const contentType = result['content-type']
@@ -282,7 +285,7 @@ export const resignHallGame = (id: string, payload: { request_id: string; expect
 export const getGameResult = (id: string) => request<GameResult>(`/api/games/${encodeURIComponent(id)}/result`)
 export const getGameStats = (opponentId?: string) => request<GameStats>(opponentId ? `/api/me/game-stats?opponent_id=${encodeURIComponent(opponentId)}` : '/api/me/game-stats')
 export const createGame = (payload: { name?: string; user_side?: 'red'|'black'|null; initial_fen: string; engine_settings?: PersistedEngineSettings; events?: PersistedGameEvent[] }) => request<PersistedGame>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
-export const importGame = (payload: { legacy_id: string; name?: string; initial_fen: string; moves: string[]; engine_settings?: PersistedEngineSettings; events?: PersistedGameEvent[]; mode?: 'legacy'|'ai_hall'; user_side?: 'red'|'black'; opponent_id?: string; opponent_snapshot?: AiFriend }) => request<PersistedGame>('/api/games/import', { method: 'POST', body: JSON.stringify(payload) })
+export const importGame = (payload: { client_platform?: ClientPlatform; legacy_id: string; name?: string; initial_fen: string; moves: string[]; engine_settings?: PersistedEngineSettings; events?: PersistedGameEvent[]; mode?: 'legacy'|'ai_hall'; user_side?: 'red'|'black'; opponent_id?: string; opponent_snapshot?: AiFriend }) => request<PersistedGame>('/api/games/import', { method: 'POST', body: JSON.stringify(payload) })
 export const appendGameMove = (id: string, payload: { expected_version: number; uci: string; engine_settings?: PersistedEngineSettings }) => request<PersistedGame>(`/api/games/${encodeURIComponent(id)}/moves`, { method: 'POST', body: JSON.stringify(payload) })
 export const deleteGame = (id: string) => request<void>(`/api/games/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const updateGameEvents = (id: string, payload: { expected_version: number; events: PersistedGameEvent[] }) => request<PersistedGame>(`/api/games/${encodeURIComponent(id)}/events`, { method: 'PATCH', body: JSON.stringify(payload) })

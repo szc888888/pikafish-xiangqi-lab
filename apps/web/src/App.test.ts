@@ -443,7 +443,7 @@ describe('saved game navigation', () => {
 
   it('uploads one local game with its events and replaces its local identity only after verification', async () => {
     const state = await mountApp()
-    const game = { ...state.createGameRecord('local-game', '2026-11-12', '2026-11-12'), moves: ['a3a4', 'a6a5'], events: [{ id: 'event-1' }] }
+    const game = { ...state.createGameRecord('local-game', '2026-11-12', '2026-11-12'), clientPlatform: 'mini_program', moves: ['a3a4', 'a6a5'], events: [{ id: 'event-1' }] }
     state.savedGames = [game]
     state.currentUser = { id: 'user-1', status: 'active', privacy_accepted: true }
     state.currentGameId = game.id
@@ -451,7 +451,7 @@ describe('saved game navigation', () => {
     vi.mocked(api.importGame).mockResolvedValue(remote as any)
     vi.mocked(api.getGame).mockResolvedValue(remote as any)
     await state.uploadSavedGame(game)
-    expect(api.importGame).toHaveBeenCalledWith(expect.objectContaining({ legacy_id: 'local-game', moves: game.moves, events: game.events, user_side: 'red' }))
+    expect(api.importGame).toHaveBeenCalledWith(expect.objectContaining({ legacy_id: 'local-game', client_platform: 'mini_program', moves: game.moves, events: game.events, user_side: 'red' }))
     expect(state.savedGames).toHaveLength(1)
     expect(state.savedGames[0]).toMatchObject({ id: 'cloud-game', serverVersion: 2, syncedEvents: 1 })
     expect(state.currentGameId).toBe('cloud-game')
@@ -742,4 +742,32 @@ it.each(['fen', 'setup'])('starts independent play from %s after a resigned hall
   expect(state.hallResult).toBeNull()
   expect(state.hallTurnId).toBeNull()
   expect(state.canHumanMove).toBe(true)
+})
+
+
+describe('per-game creation platform', () => {
+  it('records the current platform for a new game and retains it on save from another device', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Windows NT 10.0' })
+    const state = await mountApp()
+    const game = state.createGameRecord('cross-device', '2026-11-23', '2026-11-23')
+    expect(game.clientPlatform).toBe('pc')
+    state.savedGames = [game]
+    state.currentGameId = game.id
+    vi.stubGlobal('window', { ...window, __wxjs_environment: 'miniprogram' })
+    state.saveCurrentGame()
+    expect(state.savedGames[0].clientPlatform).toBe('pc')
+    expect(state.createGameRecord('new-mini', '2026-11-23', '2026-11-23').clientPlatform).toBe('mini_program')
+  })
+
+  it('does not invent a platform when saving an old local record', async () => {
+    const state = await mountApp()
+    const game = state.createGameRecord('legacy-source', '2026-11-20', '2026-11-20')
+    delete game.clientPlatform
+    state.savedGames = [game]
+    state.currentGameId = game.id
+    vi.stubGlobal('navigator', { userAgent: 'Windows NT 10.0' })
+    state.saveCurrentGame()
+    expect(state.savedGames[0].clientPlatform).toBe('unknown')
+    expect(state.serverGameRecord({ id: 'cloud', created_at: '2026-11-20', updated_at: '2026-11-20', initial_fen: START_FEN, moves: [], version: 0 }).clientPlatform).toBe('unknown')
+  })
 })

@@ -84,6 +84,7 @@ class Game(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    client_platform: Mapped[str] = mapped_column(String(24), default="unknown", server_default="unknown")
     legacy_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     initial_fen: Mapped[str] = mapped_column(String(220))
