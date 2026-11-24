@@ -39,7 +39,7 @@ h1, h2, p { margin: 0; } h1 { font-size: clamp(25px, 4vw, 42px); letter-spacing:
 .duel-left .duel-settings { margin-top: 14px; padding-top: 14px; border-top: 1px solid #e2e9e3; }.duel-left .duel-settings .engine-controls { margin-top: 12px; }.duel-left .duel-settings:not([open]) .engine-controls, .duel-left .duel-settings:not([open]) .difficulty-help { display: none; }
 @media (max-width: 1100px) { .layout { grid-template-columns: minmax(440px, 1fr) minmax(380px, .9fr); gap: 18px; }.sidebar { grid-template-columns: 1fr; grid-template-areas: "duel" "plan" "position" "analysis" "games"; }.duel-card { grid-template-columns: 1fr; grid-column: auto; }.duel-right { border-left: 0; border-top: 1px solid #e2e9e3; margin-top: 18px; padding: 18px 0 0; }.duel-right .hint-settings { margin-top: 0; }.duel-controls { grid-template-columns: 1fr 1fr; }.duel-controls > label:first-child, .duel-controls > label.wide { grid-column: 1 / -1; } }
 @media (max-width: 820px) { .shell { padding: 22px 14px 36px; }.topbar { flex-direction: column; }.layout { grid-template-columns: 1fr; }.board-panel { position: static; padding: 14px; }.board-wrap { max-width: 560px; max-height: none; }.turn-line { flex-direction: column; }.files { font-size: 12px; } }
-.workspace { display: grid; grid-template-columns: minmax(390px, .95fr) minmax(460px, 1.05fr); gap: 22px; align-items: start; }
+.workspace { display: grid; grid-template-columns: minmax(390px, .95fr) minmax(460px, 1.05fr); gap: 22px; align-items: start; overflow-anchor: none; }
 .admin-page { display: grid; gap: 18px; }
 .admin-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding-bottom: 4px; }
 .admin-heading h1 { margin-top: 4px; font-size: 28px; }
