@@ -6,6 +6,8 @@
 
 ## 当前产品与架构边界
 
+- 当前正式发布目标环境为 Windows x86-64 主机上的 Docker Desktop，容器使用 Linux x86-64。涉及发布、部署、引擎打包和运行验证的改动，必须以此环境为准；Windows 原生开发脚本和 macOS/Linux 本机运行不代表正式发布已验证。
+- 正式发布验证需在 Windows + Docker Desktop 环境执行并记录实际结果。容器内 Linux 测试可验证 Linux 容器行为，但不能替代 Windows 宿主机上的 Docker Desktop 发布验证；Windows PowerShell 启动脚本测试仅在该脚本属于改动范围时执行。
 - 当前 V1 首页是“棋友大厅”，第一阶段只支持 AI 对手，不实现真人对弈、好友对弈或排行榜。
 - 20 个 AI 棋友定义在 `apps/api/app/ai_friends.json`，由 `apps/api/app/ai_friends.py` 加载和严格校验。棋友是稳定的展示身份与策略档位，不是 20 个独立引擎实例。
 - AI 棋友只允许引用现有五档 `companion`、`beginner`、`progress`、`serious`、`full`。不得使用 Pikafish 不支持或项目未验证的 `Skill Level`、`UCI_Elo`，客户端不得提交任意引擎参数。
@@ -102,6 +104,7 @@
 ### 按运行环境选择测试方法
 
 - 开始验证前确认当前操作系统、Shell、Python 版本和依赖是否安装。后端使用 Python 3.11+ 及 `apps/api/requirements.txt`，前端使用 Node.js/npm 及 `apps/web/package.json` 中的依赖。使用当前平台的虚拟环境，不复用其他操作系统生成的 `.venv` 或 `node_modules`。
+- 正式发布目标是 Windows x86-64 + Docker Desktop（Linux x86-64 容器）。涉及发布链路的改动，除适用的代码测试外，还要在该目标环境验证 Docker 镜像构建、Compose 启动和服务健康状态；仅在 Linux CI/容器内通过不能代替目标环境验证。若当前执行环境无法访问 Windows Docker Desktop，必须在交付结果中明确说明未完成该项验证。
 - 以下后端命令均在 `apps/api` 执行；前端命令均在 `apps/web` 执行。后端全量检查使用 `-rs` 显示跳过原因，不通过排除失败测试来宣称全量通过。
 
 | 环境 | 后端全量测试 | 启动脚本验证与平台限制 |
